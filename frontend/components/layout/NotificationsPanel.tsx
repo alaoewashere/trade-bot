@@ -3,24 +3,76 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Check } from 'lucide-react';
+import { api, AlertRecord } from '@/lib/api';
 
 interface NotificationsPanelProps {
   open: boolean;
   onClose: () => void;
 }
 
-const NOTIFS = [
-  { icon: '🤖', title: 'AI Consensus: BULLISH on BTC/USDT', desc: '28 of 40 agents aligned on bullish signal', time: '2 min ago', color: '#22C55E' },
-  { icon: '⚠️', title: 'Risk Alert: Position approaching stop loss', desc: 'ETH/USDT long at 92% of max drawdown', time: '5 min ago', color: '#F59E0B' },
-  { icon: '✅', title: 'Trade #1247 closed: +$340 profit', desc: 'BTC/USDT long closed at $67,420 target', time: '12 min ago', color: '#22C55E' },
-  { icon: '📊', title: 'New forecast: BTC 4H BULLISH 78%', desc: 'Trend-following strategy generated new signal', time: '18 min ago', color: '#4F7CFF' },
-  { icon: '🔔', title: 'Daily PnL limit at 60% — monitoring', desc: 'Current daily drawdown: $742 / $1,250 limit', time: '1h ago', color: '#F59E0B' },
-  { icon: '🔄', title: 'Strategy rebalance complete', desc: 'Momentum Breakout adjusted position sizes', time: '1h 30m ago', color: '#4F7CFF' },
-  { icon: '📰', title: 'High-impact news: Fed rate decision', desc: 'Macro event detected — agents on alert mode', time: '2h ago', color: '#EF4444' },
-  { icon: '🎯', title: 'Backtest complete: 71.4% win rate', desc: 'Trend Following v2 backtest over 6 months', time: '3h ago', color: '#22C55E' },
-];
+const SEVERITY_ICON: Record<string, string> = {
+  critical: '⚠️',
+  warning: '🔔',
+  info: 'ℹ️',
+};
+
+const SEVERITY_COLOR: Record<string, string> = {
+  critical: '#EF4444',
+  warning: '#F59E0B',
+  info: '#4F7CFF',
+};
+
+function timeAgo(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
 
 export default function NotificationsPanel({ open, onClose }: NotificationsPanelProps) {
+  const [alerts, setAlerts] = React.useState<AlertRecord[]>([]);
+  const [unread, setUnread] = React.useState(0);
+
+  const load = React.useCallback(async () => {
+    try {
+      const [list, count] = await Promise.all([
+        api.alerts.list({ limit: 30 }),
+        api.alerts.unreadCount(),
+      ]);
+      setAlerts(list);
+      setUnread(count.unread_count);
+    } catch {
+      // Backend unavailable — leave prior state, panel just shows what it has.
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    load();
+    const interval = setInterval(load, 15000);
+    return () => clearInterval(interval);
+  }, [open, load]);
+
+  async function acknowledge(id: string) {
+    try {
+      await api.alerts.acknowledge(id);
+      setAlerts(prev => prev.map(a => a.id === id ? { ...a, acknowledged: true } : a));
+      setUnread(prev => Math.max(0, prev - 1));
+    } catch {
+      // best-effort UI update only
+    }
+  }
+
+  async function markAllRead() {
+    const unacked = alerts.filter(a => !a.acknowledged);
+    await Promise.all(unacked.map(a => api.alerts.acknowledge(a.id).catch(() => null)));
+    setAlerts(prev => prev.map(a => ({ ...a, acknowledged: true })));
+    setUnread(0);
+  }
+
   return (
     <AnimatePresence>
       {open && (
@@ -59,10 +111,10 @@ export default function NotificationsPanel({ open, onClose }: NotificationsPanel
             }}>
               <div>
                 <div style={{ fontSize: 16, fontWeight: 700, color: '#E2E8F0' }}>Notifications</div>
-                <div style={{ fontSize: 11, color: '#475569', marginTop: 2 }}>{NOTIFS.length} unread</div>
+                <div style={{ fontSize: 11, color: '#475569', marginTop: 2 }}>{unread} unread</div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <button style={{
+                <button onClick={markAllRead} style={{
                   display: 'flex', alignItems: 'center', gap: 5,
                   padding: '5px 10px', borderRadius: 7, fontSize: 11, fontWeight: 600,
                   color: '#4F7CFF', background: 'rgba(79,124,255,0.1)',
@@ -86,34 +138,47 @@ export default function NotificationsPanel({ open, onClose }: NotificationsPanel
 
             {/* List */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-              {NOTIFS.map((n, i) => (
-                <div key={i} style={{
-                  display: 'flex', gap: 12, padding: '12px 20px',
-                  borderBottom: '1px solid rgba(255,255,255,0.03)',
-                  cursor: 'pointer', transition: 'background 0.12s',
-                }}
-                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                >
-                  <div style={{
-                    width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: `${n.color}18`,
-                    border: `1px solid ${n.color}30`,
-                    fontSize: 16,
-                  }}>{n.icon}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12.5, fontWeight: 600, color: '#E2E8F0', lineHeight: 1.4 }}>{n.title}</div>
-                    <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 3, lineHeight: 1.4 }}>{n.desc}</div>
-                    <div style={{ fontSize: 10.5, color: '#334155', marginTop: 4 }}>{n.time}</div>
-                  </div>
-                  <div style={{
-                    width: 7, height: 7, borderRadius: '50%',
-                    background: n.color, flexShrink: 0, marginTop: 6,
-                    boxShadow: `0 0 6px ${n.color}`,
-                  }} />
+              {alerts.length === 0 && (
+                <div style={{ padding: '32px 20px', textAlign: 'center', fontSize: 12, color: '#475569' }}>
+                  No alerts yet.
                 </div>
-              ))}
+              )}
+              {alerts.map((n) => {
+                const color = SEVERITY_COLOR[n.severity] || '#4F7CFF';
+                return (
+                  <div key={n.id} onClick={() => !n.acknowledged && acknowledge(n.id)} style={{
+                    display: 'flex', gap: 12, padding: '12px 20px',
+                    borderBottom: '1px solid rgba(255,255,255,0.03)',
+                    cursor: 'pointer', transition: 'background 0.12s',
+                    opacity: n.acknowledged ? 0.55 : 1,
+                  }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <div style={{
+                      width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: `${color}18`,
+                      border: `1px solid ${color}30`,
+                      fontSize: 16,
+                    }}>{SEVERITY_ICON[n.severity] || '🔔'}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, color: '#E2E8F0', lineHeight: 1.4 }}>
+                        {n.symbol ? `${n.symbol}: ` : ''}{n.alert_type.replace(/_/g, ' ')}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#64748B', marginTop: 3, lineHeight: 1.4 }}>{n.message}</div>
+                      <div style={{ fontSize: 10.5, color: '#334155', marginTop: 4 }}>{timeAgo(n.created_at)}</div>
+                    </div>
+                    {!n.acknowledged && (
+                      <div style={{
+                        width: 7, height: 7, borderRadius: '50%',
+                        background: color, flexShrink: 0, marginTop: 6,
+                        boxShadow: `0 0 6px ${color}`,
+                      }} />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </motion.div>
         </>

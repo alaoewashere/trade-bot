@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     glassnode_api_key: str = Field(default="", description="Glassnode API key.")
     cryptoquant_api_key: str = Field(default="", description="CryptoQuant API key.")
+    whale_alert_api_key: str = Field(
+        default="",
+        description="Whale Alert API key — enables /markets/whale-activity. Empty means the feature reports 'provider not configured' rather than fabricating data.",
+    )
+    exchange_flow_api_key: str = Field(
+        default="",
+        description="Exchange in/out flow provider API key (e.g. CryptoQuant/Glassnode flow endpoints) — enables /markets/exchange-flows. Empty means the feature reports 'provider not configured'.",
+    )
 
     # ------------------------------------------------------------------
     # Risk limits (USD)

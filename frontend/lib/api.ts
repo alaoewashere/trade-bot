@@ -261,6 +261,153 @@ export interface BacktestRunDetail extends BacktestRunSummary {
   created_by: string | null;
 }
 
+// --- Phase 3: Portfolio / Markets / Alerts ---
+
+export interface PortfolioSnapshot {
+  equity_usd: number;
+  cash_usd: number;
+  open_positions_value_usd: number;
+  unrealised_pnl_usd: number;
+  unrealised_pnl_pct: number;
+  total_pnl_usd: number;
+  total_pnl_pct: number;
+  portfolio_heat_pct: number;
+  open_positions_count: number;
+  win_rate_pct: number;
+  daily_pnl_usd: number;
+  weekly_pnl_usd: number;
+  monthly_pnl_usd: number;
+  max_drawdown_pct: number;
+  sharpe_ratio: number | null;
+  snapshot_at: string;
+}
+
+export interface AllocationBreakdown {
+  by_symbol: Record<string, number>;
+  by_direction: Record<string, number>;
+  by_broker: Record<string, number>;
+  diversification_score: number;
+  calculated_at: string;
+}
+
+export interface RiskExposureEntry {
+  symbol: string;
+  direction: string;
+  position_size_usd: number;
+  risk_usd: number;
+  risk_pct_of_equity: number;
+  stop_loss: number;
+  entry_price: number;
+}
+
+export interface RiskExposure {
+  total_exposure_usd: number;
+  total_risk_usd: number;
+  portfolio_heat_pct: number;
+  positions: RiskExposureEntry[];
+  measured_at: string;
+}
+
+export interface OpenPosition {
+  trade_id: string;
+  symbol: string;
+  direction: string;
+  quantity: number;
+  entry_price: number;
+  current_price: number | null;
+  unrealised_pnl_usd: number | null;
+  unrealised_pnl_pct: number | null;
+  stop_loss: number;
+  take_profit_levels: number[];
+  broker_order_id: string | null;
+  opened_at: string;
+  duration_minutes: number;
+}
+
+export interface TradeRecord {
+  trade_id: string;
+  symbol: string;
+  direction: string;
+  entry_type: string;
+  entry_price: number | null;
+  filled_price: number | null;
+  quantity: number;
+  stop_loss: number;
+  take_profit_levels: number[];
+  broker: string;
+  broker_order_id: string | null;
+  status: string;
+  pnl_usd: number | null;
+  pnl_pct: number | null;
+  commission: number;
+  slippage: number;
+  consensus_direction: string | null;
+  consensus_confidence_pct: number | null;
+  approval_id: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  notes: string;
+}
+
+export interface LiveTicker {
+  symbol: string;
+  price: number;
+  change_24h_pct: number;
+  high_24h: number;
+  low_24h: number;
+  volume_24h_quote: number;
+  updated_at: string;
+}
+
+export interface OrderBookResponse {
+  symbol: string;
+  bids: { price: number; quantity: number }[];
+  asks: { price: number; quantity: number }[];
+  best_bid: number;
+  best_ask: number;
+  spread_bps: number;
+  fetched_at: string;
+}
+
+export interface FundingResponse {
+  symbol: string;
+  applicable: boolean;
+  funding_rate_pct: number | null;
+  next_funding_time: string | null;
+  open_interest: number | null;
+  note: string | null;
+}
+
+export interface FearGreedResponse {
+  value: number;
+  classification: string;
+  updated_at: string;
+  source: string;
+}
+
+export interface ProviderGatedResponse {
+  provider_configured: boolean;
+  data: Record<string, unknown>[];
+  message: string;
+}
+
+export interface AlertRecord {
+  id: string;
+  created_at: string;
+  alert_type: string;
+  severity: 'info' | 'warning' | 'critical';
+  symbol: string | null;
+  message: string;
+  payload: Record<string, unknown>;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+}
+
+export interface UnreadCountResponse {
+  unread_count: number;
+  by_severity: Record<string, number>;
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: {
@@ -295,6 +442,17 @@ export const api = {
 
   portfolio: {
     getMetrics: () => fetchAPI<PortfolioMetrics>('/portfolio/metrics'),
+    getSnapshot: () => fetchAPI<PortfolioSnapshot>('/portfolio'),
+    getAllocation: () => fetchAPI<AllocationBreakdown>('/portfolio/allocation'),
+    getRiskExposure: () => fetchAPI<RiskExposure>('/portfolio/risk-exposure'),
+    getHistory: (params?: { interval?: string; limit?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.interval) qs.set('interval', params.interval);
+      if (params?.limit) qs.set('limit', String(params.limit));
+      const q = qs.toString();
+      return fetchAPI<unknown[]>(`/portfolio/history${q ? `?${q}` : ''}`);
+    },
+    getDrawdown: () => fetchAPI<unknown>('/portfolio/drawdown'),
   },
 
   risk: {
@@ -337,6 +495,17 @@ export const api = {
   },
 
   trades: {
+    list: (params?: { symbol?: string; direction?: string; status?: string; limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.direction) qs.set('direction', params.direction);
+      if (params?.status) qs.set('status', params.status);
+      if (params?.limit) qs.set('limit', String(params.limit));
+      if (params?.offset) qs.set('offset', String(params.offset));
+      const q = qs.toString();
+      return fetchAPI<TradeRecord[]>(`/trades${q ? `?${q}` : ''}`);
+    },
+    listOpen: () => fetchAPI<OpenPosition[]>('/trades/open'),
     stats: (params?: { symbol?: string; since?: string }) => {
       const qs = new URLSearchParams();
       if (params?.symbol) qs.set('symbol', params.symbol);
@@ -380,6 +549,35 @@ export const api = {
     killSwitch: () =>
       fetchAPI<{ success: boolean; message: string }>('/system/kill', { method: 'POST' }),
     getStatus: () => fetchAPI<{ status: string; uptime: number }>('/system/status'),
+  },
+
+  markets: {
+    getLive: (symbols?: string[]) =>
+      fetchAPI<LiveTicker[]>(`/markets/live${symbols?.length ? `?symbols=${symbols.join(',')}` : ''}`),
+    getOrderbook: (symbol: string, depth = 20) =>
+      fetchAPI<OrderBookResponse>(`/markets/${encodeURIComponent(symbol)}/orderbook?depth=${depth}`),
+    getFunding: (symbol: string) =>
+      fetchAPI<FundingResponse>(`/markets/${encodeURIComponent(symbol)}/funding`),
+    getFearGreed: () => fetchAPI<FearGreedResponse>('/markets/fear-greed'),
+    getWhaleActivity: () => fetchAPI<ProviderGatedResponse>('/markets/whale-activity'),
+    getExchangeFlows: () => fetchAPI<ProviderGatedResponse>('/markets/exchange-flows'),
+  },
+
+  alerts: {
+    list: (params?: { alert_type?: string; severity?: string; acknowledged?: boolean; symbol?: string; limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.alert_type) qs.set('alert_type', params.alert_type);
+      if (params?.severity) qs.set('severity', params.severity);
+      if (params?.acknowledged !== undefined) qs.set('acknowledged', String(params.acknowledged));
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.limit) qs.set('limit', String(params.limit));
+      if (params?.offset) qs.set('offset', String(params.offset));
+      const q = qs.toString();
+      return fetchAPI<AlertRecord[]>(`/alerts${q ? `?${q}` : ''}`);
+    },
+    acknowledge: (id: string) =>
+      fetchAPI<AlertRecord>(`/alerts/${id}/acknowledge`, { method: 'POST' }),
+    unreadCount: () => fetchAPI<UnreadCountResponse>('/alerts/unread-count'),
   },
 };
 

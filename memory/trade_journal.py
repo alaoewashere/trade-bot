@@ -187,6 +187,7 @@ class TradeJournal:
         """
         _assert_pool(self._pool)
         proposal_id = str(uuid.uuid4())
+        symbol = str(proposal.get("symbol", ""))
 
         sql = """
             INSERT INTO trade_proposals
@@ -196,10 +197,29 @@ class TradeJournal:
             RETURNING id::TEXT
         """
         async with self._pool.acquire() as conn:
+            # Phase 3 alert hook: fetch the most recent prior proposal for
+            # this symbol *before* inserting the new one, so we can detect a
+            # consensus/confidence change. This is the actual persistence
+            # point for consensus results, so it mirrors how Phase 1 hooked
+            # _auto_create_journal_entry into trades.py's close_position.
+            previous = None
+            try:
+                previous = await conn.fetchrow(
+                    """
+                    SELECT side, confidence FROM trade_proposals
+                    WHERE symbol = $1
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    symbol,
+                )
+            except Exception:
+                logger.exception("Could not look up previous proposal for %s (non-fatal)", symbol)
+
             row = await conn.fetchrow(
                 sql,
                 proposal_id,
-                str(proposal.get("symbol", "")),
+                symbol,
                 str(proposal.get("side", "")),
                 float(proposal.get("quantity", 0)),
                 _opt_float(proposal.get("signal_strength")),
@@ -214,6 +234,21 @@ class TradeJournal:
                     default=str,
                 ),
             )
+
+            try:
+                from alerts.generator import generate_consensus_alerts
+
+                await generate_consensus_alerts(
+                    conn,
+                    symbol=symbol,
+                    new_direction=str(proposal.get("side")) or None,
+                    new_confidence=_opt_float(proposal.get("confidence")),
+                    previous_direction=previous["side"] if previous else None,
+                    previous_confidence=float(previous["confidence"]) if previous and previous["confidence"] is not None else None,
+                )
+            except Exception:
+                logger.exception("Alert generation failed for proposal %s (non-fatal)", proposal_id)
+
         result_id = row["id"] if row else proposal_id
         logger.info("Proposal saved: %s %s %s @ qty=%.4f",
                     result_id, proposal.get("side"), proposal.get("symbol"),

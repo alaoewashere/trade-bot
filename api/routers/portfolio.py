@@ -11,6 +11,8 @@ GET /portfolio/performance              — detailed performance metrics
 GET /portfolio/risk-exposure            — current risk exposure breakdown
 GET /portfolio/drawdown                 — drawdown analysis
 GET /portfolio/allocation               — allocation by symbol / direction / broker
+                                           (includes a diversification_score,
+                                           1 - Herfindahl index over symbol weights)
 """
 from __future__ import annotations
 
@@ -114,6 +116,7 @@ class AllocationBreakdown(BaseModel):
     by_symbol: dict[str, float]
     by_direction: dict[str, float]
     by_broker: dict[str, float]
+    diversification_score: float
     calculated_at: str
 
 
@@ -509,9 +512,21 @@ async def get_allocation(
         by_direction[r["direction"]] = by_direction.get(r["direction"], 0.0) + val
         by_broker[r["broker"]] = by_broker.get(r["broker"], 0.0) + val
 
+    # Diversification score = 1 - Herfindahl-Hirschman Index over by-symbol
+    # allocation weights. HHI = sum(weight_i^2) for weight_i in [0, 1];
+    # HHI == 1 means fully concentrated in one symbol (score 0), while an
+    # even spread across N symbols yields HHI == 1/N (score approaches 1).
+    total_alloc = sum(by_symbol.values())
+    if total_alloc > 0:
+        hhi = sum((v / total_alloc) ** 2 for v in by_symbol.values())
+        diversification_score = round(max(0.0, 1.0 - hhi), 4)
+    else:
+        diversification_score = 0.0
+
     return AllocationBreakdown(
         by_symbol=by_symbol,
         by_direction=by_direction,
         by_broker=by_broker,
+        diversification_score=diversification_score,
         calculated_at=datetime.now(timezone.utc).isoformat(),
     )

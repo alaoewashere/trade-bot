@@ -910,6 +910,26 @@ async def close_position(
 
     await _auto_create_journal_entry(db, row, closed_at)
 
+    # Phase 3: alert-center hook, mirroring the _auto_create_journal_entry
+    # precedent above — best-effort, never raises into this endpoint.
+    try:
+        from alerts.generator import generate_trade_close_alert
+
+        direction = row["direction"]
+        # Mirrors _auto_create_journal_entry's own note: no live price feed
+        # is available at manual-close time, so PnL here is an estimate.
+        pnl_usd = 0.0
+        await generate_trade_close_alert(
+            db,
+            symbol=row["symbol"],
+            direction=direction,
+            pnl_usd=pnl_usd,
+            reason=body.reason,
+            trade_id=trade_id,
+        )
+    except Exception:
+        logger.exception("Alert generation failed for trade close %s", trade_id)
+
     return {
         "trade_id": trade_id,
         "status": "closed",
