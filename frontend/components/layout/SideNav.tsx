@@ -5,7 +5,7 @@ import {
   LayoutDashboard, TrendingUp, Bot, PieChart, Zap,
   Search, BookOpen, BarChart2, History, FlaskConical,
   Newspaper, Settings, ChevronLeft, ChevronRight,
-  Globe, LineChart, ShieldAlert,
+  Globe, LineChart, ShieldAlert, Radio, Cable, ListChecks,
 } from 'lucide-react';
 
 interface NavItem {
@@ -29,8 +29,11 @@ const NAV: NavItem[] = [
   { id: 'news',        label: 'News Feed',      Icon: Newspaper,       badge: 'NEW' },
   { id: 'performance', label: 'Performance',    Icon: BarChart2,       section: 'ANALYTICS' },
   { id: 'backtesting', label: 'Backtesting',    Icon: History },
-  { id: 'paper',       label: 'Paper Trading',  Icon: FlaskConical },
   { id: 'charts2',     label: 'Chart View',     Icon: LineChart },
+  { id: 'paper',              label: 'Paper Trading',      Icon: FlaskConical, section: 'TRADING EXECUTION' },
+  { id: 'live-trading',       label: 'Live Trading',       Icon: Radio },
+  { id: 'broker-connections', label: 'Broker Connections', Icon: Cable },
+  { id: 'execution-history',  label: 'Execution History',  Icon: ListChecks },
   { id: 'settings',    label: 'Settings',       Icon: Settings,        section: 'SYSTEM' },
 ];
 

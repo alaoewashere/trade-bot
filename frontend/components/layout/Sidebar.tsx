@@ -7,6 +7,7 @@ import {
   PieChart, Zap, Search, BookOpen, BarChart2,
   History, FlaskConical, Newspaper, Settings,
   ChevronLeft, ChevronRight, Globe, ShieldAlert,
+  Radio, Cable, ListChecks,
 } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 
@@ -32,8 +33,11 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'news',         label: 'News Feed',      icon: Newspaper,      badge: 'NEW' },
   { id: 'performance',  label: 'Performance',    icon: BarChart2,      section: 'ANALYTICS' },
   { id: 'backtesting',  label: 'Backtesting',    icon: History },
-  { id: 'paper',        label: 'Paper Trading',  icon: FlaskConical },
   { id: 'charts2',      label: 'Charts',         icon: LineChart },
+  { id: 'paper',              label: 'Paper Trading',      icon: FlaskConical, section: 'TRADING EXECUTION' },
+  { id: 'live-trading',       label: 'Live Trading',       icon: Radio },
+  { id: 'broker-connections', label: 'Broker Connections', icon: Cable },
+  { id: 'execution-history',  label: 'Execution History',  icon: ListChecks },
   { id: 'settings',     label: 'Settings',       icon: Settings,       section: 'SYSTEM' },
 ];
 

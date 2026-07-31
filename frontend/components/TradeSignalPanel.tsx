@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { CheckCircle, XCircle, TrendingUp, TrendingDown, AlertTriangle, Shield } from 'lucide-react';
+import { CheckCircle, XCircle, TrendingUp, TrendingDown, AlertTriangle, Shield, Code2 } from 'lucide-react';
 import { TradeSignal, MOCK_SIGNALS, api } from '../lib/api';
 import { useTradeProposals, TradeProposal } from '../lib/hooks/useTradeProposals';
 import ConfidenceGauge from './ConfidenceGauge';
+import PineStrategyModal from './PineStrategyModal';
 
 function fmt(n: number): string {
   if (n >= 10000) return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -184,6 +185,7 @@ interface SignalCardProps {
 }
 
 function SignalCard({ signal, onApprove, onReject }: SignalCardProps) {
+  const [pineOpen, setPineOpen] = useState(false);
   const isLong = signal.direction === 'LONG';
   const dirColor = isLong ? '#22C55E' : '#EF4444';
   const dirBg = isLong ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)';
@@ -283,6 +285,33 @@ function SignalCard({ signal, onApprove, onReject }: SignalCardProps) {
         >
           {signal.agents_agreed} of {signal.agents_total} agents in agreement. Technical and on-chain signals aligned with {isLong ? 'bullish' : 'bearish'} thesis.
         </div>
+
+        {/* Pine Script generator */}
+        <button
+          onClick={() => setPineOpen(true)}
+          className="w-full py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all hover:opacity-90"
+          style={{
+            background: 'rgba(79,124,255,0.08)',
+            border: '1px solid rgba(79,124,255,0.2)',
+            color: '#4F7CFF',
+          }}
+        >
+          <Code2 className="w-3.5 h-3.5" />
+          AI → Pine Strategy
+        </button>
+
+        <PineStrategyModal
+          open={pineOpen}
+          onClose={() => setPineOpen(false)}
+          signal={{
+            symbol: signal.symbol,
+            direction: signal.direction,
+            entry: entryMid,
+            stop_loss: signal.stop_loss,
+            take_profit: signal.take_profit,
+            confidence: signal.confidence,
+          }}
+        />
 
         {/* Action buttons */}
         {signal.status === 'pending' ? (

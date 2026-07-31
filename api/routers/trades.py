@@ -13,6 +13,7 @@ GET  /trades/stats                  — aggregate performance statistics
 GET  /trades/equity-curve           — cumulative equity/drawdown time series
 GET  /trades/calendar               — daily PnL bucketed by date
 POST /trades/{trade_id}/close       — manually close a position (paper only)
+POST /trades/paper/execute          — execute a signal against the paper broker
 """
 from __future__ import annotations
 
@@ -22,10 +23,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from api.dependencies import get_db
+from api.dependencies import get_db, get_redis
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -135,6 +137,40 @@ class TimelineEvent(BaseModel):
     description: str
     occurred_at: str
     metadata: dict[str, Any]
+
+
+class PaperExecuteRequest(BaseModel):
+    """
+    Everything needed to place a paper order for an already-computed AI
+    signal — the frontend passes through whatever it already fetched for
+    ConsensusPanel/TradeSignalPanel (RiskAssessmentResponse / TradeSignal)
+    rather than this endpoint re-deriving entry/SL/TP itself.
+    """
+
+    symbol: str
+    direction: str  # LONG | SHORT
+    quantity: float
+    entry_price: float | None = None  # informational only; fill price comes from the broker
+    stop_loss: float
+    take_profit: float
+    consensus_direction: str | None = None
+    consensus_confidence_pct: float | None = None
+    proposal_id: str | None = None
+    notes: str = ""
+
+
+class PaperExecuteResponse(BaseModel):
+    trade_id: str
+    symbol: str
+    direction: str
+    quantity: float
+    filled_price: float
+    commission: float
+    slippage: float
+    stop_loss: float
+    take_profit: float
+    status: str
+    opened_at: str
 
 
 # ---------------------------------------------------------------------------
@@ -937,3 +973,145 @@ async def close_position(
         "reason": body.reason,
         "message": "Position closed successfully.",
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /trades/paper/execute
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/paper/execute",
+    response_model=PaperExecuteResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Execute an AI signal against the paper broker",
+)
+async def execute_paper_trade(
+    body: PaperExecuteRequest,
+    db: asyncpg.Connection = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> PaperExecuteResponse:
+    """
+    Paper-only execution path: the "Execute on Paper" button in the Trading
+    Execution hub calls this. Order of operations is deliberate —
+    1) staleness gate (never trade on stale/disconnected live data),
+    2) PaperBroker.place_order (real Redis-persisted simulated fill),
+    3) persist a row in `trades` the same shape the rest of the platform
+       (journal auto-create, /trades/stats, /trades/open) already reads.
+    Never permitted outside paper/dev environments.
+    """
+    from brokers.paper_broker import PaperBroker
+    from config.settings import get_settings
+    from risk.circuit_breakers import MarketDataStalenessGate, StaleMarketDataError
+
+    settings = get_settings()
+    if settings.is_live:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Paper execution is not available in live mode — no live broker is wired up.",
+        )
+
+    direction = body.direction.upper()
+    if direction not in ("LONG", "SHORT"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="direction must be 'LONG' or 'SHORT'.",
+        )
+    if body.quantity <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="quantity must be positive.",
+        )
+
+    gate = MarketDataStalenessGate(redis)
+    try:
+        await gate.assert_fresh_or_raise(body.symbol)
+    except StaleMarketDataError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Refusing to execute — market data for {body.symbol} is stale: {exc}",
+        ) from exc
+
+    broker = PaperBroker(redis_client=redis)
+    await broker.initialise()
+
+    side = "buy" if direction == "LONG" else "sell"
+    result = await broker.place_order(body.symbol, side, body.quantity, order_type="market")
+
+    if not result.success or result.filled_price is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.error or "Paper order was not filled.",
+        )
+
+    opened_at = datetime.now(timezone.utc)
+    row = await db.fetchrow(
+        """
+        INSERT INTO trades (
+            proposal_id, symbol, direction, entry_type, quantity,
+            entry_price, filled_price, stop_loss, take_profit,
+            take_profit_levels, broker, broker_order_id, status,
+            commission, slippage, consensus_direction,
+            consensus_confidence_pct, opened_at, notes
+        )
+        VALUES (
+            $1, $2, $3, 'market', $4,
+            $5, $5, $6, $7,
+            ARRAY[$7]::DECIMAL(24,8)[], 'paper', $8, 'open',
+            $9, $10, $11,
+            $12, $13, $14
+        )
+        RETURNING trade_id, opened_at
+        """,
+        body.proposal_id,
+        body.symbol,
+        direction,
+        body.quantity,
+        result.filled_price,
+        body.stop_loss,
+        body.take_profit,
+        result.order_id,
+        result.commission,
+        result.slippage,
+        body.consensus_direction,
+        body.consensus_confidence_pct,
+        opened_at,
+        body.notes,
+    )
+
+    trade_id = str(row["trade_id"])
+
+    await db.execute(
+        """
+        INSERT INTO trade_events (trade_id, event_type, description, occurred_at, metadata)
+        VALUES ($1, 'paper_execution', $2, $3, $4)
+        """,
+        row["trade_id"],
+        f"Paper {side} {body.quantity} {body.symbol} @ {result.filled_price:.6f}",
+        opened_at,
+        {
+            "broker": "paper",
+            "order_id": result.order_id,
+            "commission": result.commission,
+            "slippage": result.slippage,
+        },
+    )
+
+    logger.info(
+        "Paper trade executed: trade_id=%s symbol=%s direction=%s qty=%.6f fill=%.6f",
+        trade_id, body.symbol, direction, body.quantity, result.filled_price,
+    )
+
+    return PaperExecuteResponse(
+        trade_id=trade_id,
+        symbol=body.symbol,
+        direction=direction,
+        quantity=body.quantity,
+        filled_price=result.filled_price,
+        commission=result.commission,
+        slippage=result.slippage,
+        stop_loss=body.stop_loss,
+        take_profit=body.take_profit,
+        status="open",
+        opened_at=row["opened_at"].isoformat(),
+    )

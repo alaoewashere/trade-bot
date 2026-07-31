@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
+import { Download, FileText } from 'lucide-react';
 import { api, BacktestRunDetail, BacktestTradeSample } from '@/lib/api';
 
 const SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT'];
@@ -158,8 +159,32 @@ export default function BacktestingView() {
         </div>
       )}
 
-      {results && (
+      {results && run && (
         <>
+          {/* Export buttons */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginBottom: 14 }}>
+            <a
+              href={api.backtest.exportCsvUrl(run.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8,
+                fontSize: 12, fontWeight: 700, textDecoration: 'none',
+                background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#CBD5E1',
+              }}
+            >
+              <Download size={13} /> Export CSV
+            </a>
+            <a
+              href={api.backtest.exportPdfUrl(run.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8,
+                fontSize: 12, fontWeight: 700, textDecoration: 'none',
+                background: 'rgba(79,124,255,0.1)', border: '1px solid rgba(79,124,255,0.25)', color: '#4F7CFF',
+              }}
+            >
+              <FileText size={13} /> Export PDF
+            </a>
+          </div>
+
           {/* Results KPIs */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
             {kpis.map((k, i) => (
@@ -200,6 +225,34 @@ export default function BacktestingView() {
             <div style={{ background: '#121826', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '14px 18px' }}>
               <div style={{ fontSize: 10, color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginBottom: 6 }}>LOSS STREAK</div>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: '#EF4444' }}>{results.longest_losing_streak}</div>
+            </div>
+          </div>
+
+          {/* Additional risk metrics row */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
+            <div style={{ background: '#121826', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '14px 18px' }}>
+              <div style={{ fontSize: 10, color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginBottom: 6 }}>GROSS PROFIT</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: '#22C55E' }}>
+                {results.gross_profit_usd !== undefined ? fmtUsd(results.gross_profit_usd) : '—'}
+              </div>
+            </div>
+            <div style={{ background: '#121826', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '14px 18px' }}>
+              <div style={{ fontSize: 10, color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginBottom: 6 }}>GROSS LOSS</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: '#EF4444' }}>
+                {results.gross_loss_usd !== undefined ? fmtUsd(-results.gross_loss_usd) : '—'}
+              </div>
+            </div>
+            <div style={{ background: '#121826', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '14px 18px' }}>
+              <div style={{ fontSize: 10, color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginBottom: 6 }}>RECOVERY FACTOR</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: '#E2E8F0' }}>
+                {results.recovery_factor != null ? results.recovery_factor.toFixed(2) : '—'}
+              </div>
+            </div>
+            <div style={{ background: '#121826', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, padding: '14px 18px' }}>
+              <div style={{ fontSize: 10, color: '#475569', fontWeight: 700, letterSpacing: '0.1em', marginBottom: 6 }}>SORTINO RATIO</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: '#E2E8F0' }}>
+                {results.sortino_ratio != null ? results.sortino_ratio.toFixed(2) : '—'}
+              </div>
             </div>
           </div>
 

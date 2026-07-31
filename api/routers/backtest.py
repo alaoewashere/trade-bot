@@ -45,12 +45,16 @@ changing the endpoint shape.
 
 Endpoints
 ---------
-POST /backtest/run          — execute a new backtest synchronously
-GET  /backtest/runs         — paginated list of past runs
-GET  /backtest/runs/{id}    — full report for one run
+POST /backtest/run                   — execute a new backtest synchronously
+GET  /backtest/runs                  — paginated list of past runs
+GET  /backtest/runs/{id}             — full report for one run
+GET  /backtest/runs/{id}/export.csv  — trade-by-trade CSV export
+GET  /backtest/runs/{id}/export.pdf  — one-page PDF summary
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import statistics
 from datetime import datetime, timezone
@@ -58,6 +62,7 @@ from typing import Any
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.dependencies import get_db
@@ -215,6 +220,12 @@ def _run_backtest(forecast_rows: list[asyncpg.Record]) -> dict[str, Any]:
             "monthly_heatmap": [],
             "performance_by_regime": [],
             "performance_by_timeframe": [],
+            # --- additive fields (see module docstring / phase notes) ---
+            "gross_profit_usd": 0.0,
+            "gross_loss_usd": 0.0,
+            "recovery_factor": None,
+            "sortino_ratio": None,
+            "monthly_returns_pct": [],
             "note": "No usable historical forecast data (evaluated, with a recorded outcome) in this window.",
         }
 
@@ -229,17 +240,39 @@ def _run_backtest(forecast_rows: list[asyncpg.Record]) -> dict[str, Any]:
     cumulative = 0.0
     peak = 0.0
     max_dd_pct = 0.0
+    max_dd_usd = 0.0
     for t in trades:
         cumulative += t["pnl_usd"]
         peak = max(peak, cumulative)
         base = _NOTIONAL_USD + peak
         dd_pct = (peak - cumulative) / base * 100.0 if base > 0 else 0.0
         max_dd_pct = max(max_dd_pct, dd_pct)
+        max_dd_usd = max(max_dd_usd, peak - cumulative)
         equity_curve.append({
             "timestamp": t["closed_at"] or t["opened_at"],
             "cumulative_pnl_usd": round(cumulative, 2),
             "drawdown_pct": round(dd_pct, 3),
         })
+
+    # Recovery factor: net profit relative to the worst peak-to-trough drawdown
+    # in dollar terms. None (rather than a misleading infinity) when there was
+    # no drawdown to recover from.
+    recovery_factor = round(cumulative / max_dd_usd, 3) if max_dd_usd > 0 else None
+
+    # Sortino ratio off the per-trade return series (downside deviation only),
+    # mirroring api/routers/trades.py's daily-PnL Sortino but computed per
+    # trade since a backtest replay has no calendar-day cadence.
+    trade_returns = [t["return_pct"] / 100.0 for t in trades]
+    mean_trade_return = statistics.mean(trade_returns)
+    downside_returns = [r for r in trade_returns if r < 0]
+    downside_dev = (
+        statistics.pstdev(downside_returns) if len(downside_returns) > 1
+        else (abs(downside_returns[0]) if downside_returns else 0.0)
+    )
+    sortino_ratio = (
+        round((mean_trade_return / downside_dev) * (len(trade_returns) ** 0.5), 3)
+        if downside_dev > 0 else None
+    )
 
     total_return_pct = (cumulative / _NOTIONAL_USD) * 100.0
     days_span = None
@@ -275,6 +308,12 @@ def _run_backtest(forecast_rows: list[asyncpg.Record]) -> dict[str, Any]:
         monthly[month_key] = monthly.get(month_key, 0.0) + t["pnl_usd"]
     monthly_heatmap = [
         {"month": k, "pnl_usd": round(v, 2)} for k, v in sorted(monthly.items())
+    ]
+    # Same monthly buckets expressed as a % return on notional — additive
+    # sibling to monthly_heatmap's raw-dollar view, requested separately.
+    monthly_returns_pct = [
+        {"month": k, "return_pct": round(v / _NOTIONAL_USD * 100.0, 3)}
+        for k, v in sorted(monthly.items())
     ]
 
     # Performance by market regime — reuses forecasts.market_regime, when set.
@@ -321,6 +360,12 @@ def _run_backtest(forecast_rows: list[asyncpg.Record]) -> dict[str, Any]:
                 "total_pnl_usd": round(cumulative, 2),
             }
         ],
+        # --- additive fields ---
+        "gross_profit_usd": round(gross_profit, 2),
+        "gross_loss_usd": round(gross_loss, 2),
+        "recovery_factor": recovery_factor,
+        "sortino_ratio": sortino_ratio,
+        "monthly_returns_pct": monthly_returns_pct,
     }
 
 
@@ -506,3 +551,184 @@ async def get_backtest_run(
         )
 
     return _row_to_detail(row)
+
+
+# ---------------------------------------------------------------------------
+# Export helpers — shared by export.csv / export.pdf
+# ---------------------------------------------------------------------------
+
+
+async def _get_run_or_404(run_id: str, db: asyncpg.Connection) -> BacktestRunDetail:
+    row = await db.fetchrow(
+        """
+        SELECT id, created_at, symbol, timeframe, strategy_name,
+               date_range_start, date_range_end, status, results,
+               error_message, created_by, notes
+        FROM backtest_runs
+        WHERE id = $1
+        """,
+        run_id,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Backtest run '{run_id}' not found.",
+        )
+    return _row_to_detail(row)
+
+
+# ---------------------------------------------------------------------------
+# GET /backtest/runs/{run_id}/export.csv
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/runs/{run_id}/export.csv",
+    summary="Trade-by-trade CSV export of a backtest run",
+)
+async def export_backtest_csv(
+    run_id: str,
+    db: asyncpg.Connection = Depends(get_db),
+) -> StreamingResponse:
+    """
+    Only `best_trade` / `worst_trade` are persisted as full sample rows on
+    `results` (see _run_backtest — every trade isn't stored individually to
+    keep the JSONB small); the CSV therefore exports those samples plus the
+    run's own aggregate metrics as a summary footer, rather than fabricating
+    a longer per-trade ledger that doesn't exist in `results`.
+    """
+    run = await _get_run_or_404(run_id, db)
+    results = run.results
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["backtest_run_id", run.id])
+    writer.writerow(["symbol", run.symbol])
+    writer.writerow(["timeframe", run.timeframe])
+    writer.writerow(["strategy_label", run.strategy_name or ""])
+    writer.writerow(["date_range_start", run.date_range_start])
+    writer.writerow(["date_range_end", run.date_range_end])
+    writer.writerow([])
+
+    writer.writerow(["forecast_id", "opened_at", "closed_at", "direction", "entry_price",
+                      "exit_price", "return_pct", "pnl_usd", "confidence_pct", "market_regime"])
+    for sample in (results.get("best_trade"), results.get("worst_trade")):
+        if not sample:
+            continue
+        writer.writerow([
+            sample.get("forecast_id"), sample.get("opened_at"), sample.get("closed_at"),
+            sample.get("direction"), sample.get("entry_price"), sample.get("exit_price"),
+            sample.get("return_pct"), sample.get("pnl_usd"), sample.get("confidence_pct"),
+            sample.get("market_regime"),
+        ])
+
+    writer.writerow([])
+    writer.writerow(["--- summary metrics ---"])
+    for key in (
+        "num_trades", "total_return_pct", "annual_return_pct", "win_rate_pct",
+        "max_drawdown_pct", "profit_factor", "avg_trade_pnl_usd",
+        "avg_holding_time_minutes", "longest_winning_streak", "longest_losing_streak",
+        "gross_profit_usd", "gross_loss_usd", "recovery_factor", "sortino_ratio",
+    ):
+        if key in results:
+            writer.writerow([key, results[key]])
+
+    buf.seek(0)
+    filename = f"backtest_{run.symbol.replace('/', '')}_{run.id}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /backtest/runs/{run_id}/export.pdf
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/runs/{run_id}/export.pdf",
+    summary="One-page PDF summary of a backtest run",
+)
+async def export_backtest_pdf(
+    run_id: str,
+    db: asyncpg.Connection = Depends(get_db),
+) -> StreamingResponse:
+    """
+    Minimal one-page report via reportlab (the only PDF library in
+    requirements.txt as of this phase) — a title, a run identity block, and
+    the key metrics table. Deliberately not a multi-page template; this is
+    a research tool export, not a client-facing tearsheet.
+    """
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="PDF export requires the 'reportlab' package (not installed in this environment).",
+        ) from exc
+
+    run = await _get_run_or_404(run_id, db)
+    results = run.results
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, title=f"Backtest Report {run.id}")
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph(f"Backtest Report — {run.symbol} ({run.timeframe})", styles["Title"]),
+        Spacer(1, 12),
+        Paragraph(
+            f"Run ID: {run.id} &nbsp;&nbsp; Window: {run.date_range_start[:10]} "
+            f"to {run.date_range_end[:10]} &nbsp;&nbsp; Strategy label: {run.strategy_name or '—'}",
+            styles["Normal"],
+        ),
+        Spacer(1, 16),
+    ]
+
+    metric_rows = [["Metric", "Value"]]
+    display_metrics = [
+        ("Total Return %", results.get("total_return_pct")),
+        ("Annualised Return %", results.get("annual_return_pct")),
+        ("Win Rate %", results.get("win_rate_pct")),
+        ("Max Drawdown %", results.get("max_drawdown_pct")),
+        ("Profit Factor", results.get("profit_factor")),
+        ("Recovery Factor", results.get("recovery_factor")),
+        ("Sortino Ratio", results.get("sortino_ratio")),
+        ("Gross Profit $", results.get("gross_profit_usd")),
+        ("Gross Loss $", results.get("gross_loss_usd")),
+        ("Avg Trade P&L $", results.get("avg_trade_pnl_usd")),
+        ("Avg Holding Time (min)", results.get("avg_holding_time_minutes")),
+        ("Longest Win Streak", results.get("longest_winning_streak")),
+        ("Longest Loss Streak", results.get("longest_losing_streak")),
+        ("Total Trades", results.get("num_trades")),
+    ]
+    for label, value in display_metrics:
+        metric_rows.append([label, "—" if value is None else str(value)])
+
+    table = Table(metric_rows, colWidths=[220, 220])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4F7CFF")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F1F5F9")]),
+    ]))
+    story.append(table)
+
+    if results.get("note"):
+        story.append(Spacer(1, 16))
+        story.append(Paragraph(f"Note: {results['note']}", styles["Italic"]))
+
+    doc.build(story)
+    buf.seek(0)
+    filename = f"backtest_{run.symbol.replace('/', '')}_{run.id}.pdf"
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

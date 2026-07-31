@@ -406,6 +406,12 @@ export interface BacktestResults {
   performance_by_regime: { regime: string; num_trades: number; total_pnl_usd: number; win_rate_pct: number }[];
   performance_by_timeframe: { timeframe: string | null; num_trades: number; total_pnl_usd: number }[];
   note?: string;
+  // --- Phase 7 additions (additive) ---
+  gross_profit_usd?: number;
+  gross_loss_usd?: number;
+  recovery_factor?: number | null;
+  sortino_ratio?: number | null;
+  monthly_returns_pct?: { month: string; return_pct: number }[];
 }
 
 export interface BacktestRunDetail extends BacktestRunSummary {
@@ -579,6 +585,35 @@ export interface UnreadCountResponse {
   by_severity: Record<string, number>;
 }
 
+// --- Phase 7: Trading Execution hub ---
+
+export interface PaperExecuteRequest {
+  symbol: string;
+  direction: 'LONG' | 'SHORT';
+  quantity: number;
+  entry_price?: number | null;
+  stop_loss: number;
+  take_profit: number;
+  consensus_direction?: string | null;
+  consensus_confidence_pct?: number | null;
+  proposal_id?: string | null;
+  notes?: string;
+}
+
+export interface PaperExecuteResponse {
+  trade_id: string;
+  symbol: string;
+  direction: string;
+  quantity: number;
+  filled_price: number;
+  commission: number;
+  slippage: number;
+  stop_loss: number;
+  take_profit: number;
+  status: string;
+  opened_at: string;
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: {
@@ -731,6 +766,13 @@ export const api = {
       const q = qs.toString();
       return fetchAPI<CalendarDay[]>(`/trades/calendar${q ? `?${q}` : ''}`);
     },
+    executePaper: (req: PaperExecuteRequest) =>
+      fetchAPI<PaperExecuteResponse>('/trades/paper/execute', { method: 'POST', body: JSON.stringify(req) }),
+    close: (tradeId: string, reason = 'Manual close via API') =>
+      fetchAPI<{ trade_id: string; status: string; closed_at: string; reason: string; message: string }>(
+        `/trades/${tradeId}/close`,
+        { method: 'POST', body: JSON.stringify({ reason }) },
+      ),
   },
 
   backtest: {
@@ -746,6 +788,8 @@ export const api = {
       return fetchAPI<BacktestRunSummary[]>(`/backtest/runs${q ? `?${q}` : ''}`);
     },
     get: (id: string) => fetchAPI<BacktestRunDetail>(`/backtest/runs/${id}`),
+    exportCsvUrl: (id: string) => `${BASE_URL}/backtest/runs/${id}/export.csv`,
+    exportPdfUrl: (id: string) => `${BASE_URL}/backtest/runs/${id}/export.pdf`,
   },
 
   system: {
