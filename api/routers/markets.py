@@ -7,6 +7,7 @@ book depth, futures funding/open-interest, and market-sentiment indicators.
 Endpoints
 ---------
 GET /markets/live                    — price/volume/24h high-low per symbol
+GET /markets/{symbol}/candles        — historical OHLCV candles (Phase 5: chart foundation)
 GET /markets/{symbol}/orderbook      — top-N bids/asks via ccxt order book
 GET /markets/{symbol}/funding        — futures funding rate + open interest
                                         (null/"not applicable" for spot-only symbols)
@@ -138,6 +139,21 @@ class ProviderGatedResponse(BaseModel):
     message: str
 
 
+class Candle(BaseModel):
+    time: int  # unix seconds — lightweight-charts' native time unit
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class CandlesResponse(BaseModel):
+    symbol: str
+    timeframe: str
+    candles: list[Candle]
+
+
 # ---------------------------------------------------------------------------
 # GET /markets/live
 # ---------------------------------------------------------------------------
@@ -189,6 +205,83 @@ async def get_live_markets(
         await exchange.close()
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# GET /markets/{symbol}/candles — Phase 5 chart foundation
+# ---------------------------------------------------------------------------
+
+# Same timeframe set BinanceFeed.CCXT_TIMEFRAMES / RedisCacheManager._TTL_MAP
+# already support — kept here rather than importing BinanceFeed so this
+# endpoint uses the same lightweight direct-ccxt + module cache pattern as
+# the rest of this router (get_live_markets, get_orderbook, get_funding).
+_CANDLE_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+
+# Mirrors data/cache.py's RedisCacheManager._TTL_MAP — duplicated as a small
+# local constant rather than importing a private module attribute.
+_TTL_MAP_FALLBACK = {
+    "1m": 30, "5m": 150, "15m": 450, "30m": 900, "1h": 300, "4h": 1200, "1d": 3600,
+}
+
+
+@router.get(
+    "/{symbol}/candles",
+    response_model=CandlesResponse,
+    summary="Historical OHLCV candles for the chart",
+    description=(
+        "Backs InstitutionalChart's candlestick series (Phase 5). Cached in Redis "
+        "per symbol/timeframe/limit at the same TTL RedisCacheManager already uses "
+        "for that timeframe, so the chart doesn't hammer Binance on every re-render."
+    ),
+)
+async def get_candles(
+    symbol: str = Path(..., description="ccxt symbol, URL-encode the slash e.g. BTC%2FUSDT"),
+    timeframe: str = Query(default="1h", description="One of: 1m 5m 15m 30m 1h 4h 1d"),
+    limit: int = Query(default=300, ge=10, le=1000),
+) -> CandlesResponse:
+    if timeframe not in _CANDLE_TIMEFRAMES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported timeframe '{timeframe}'. Supported: {sorted(_CANDLE_TIMEFRAMES)}",
+        )
+
+    ccxt_symbol = symbol.replace("-", "/")
+    cache = await _get_cache()
+    cache_key = f"market:candles:{ccxt_symbol.replace('/', '_').upper()}:{timeframe}:{limit}"
+    ttl = _TTL_MAP_FALLBACK.get(timeframe, 300)
+
+    cached = await _short_ttl_get(cache, cache_key)
+    if cached is not None:
+        return CandlesResponse(**cached)
+
+    exchange = _make_exchange()
+    try:
+        try:
+            raw = await exchange.fetch_ohlcv(ccxt_symbol, timeframe, limit=limit)
+        except Exception as exc:
+            logger.error("fetch_ohlcv failed for %s %s: %s", ccxt_symbol, timeframe, exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not fetch candles for '{ccxt_symbol}' {timeframe}: {exc}",
+            ) from exc
+    finally:
+        await exchange.close()
+
+    candles = [
+        Candle(
+            time=int(row[0] // 1000),
+            open=float(row[1]),
+            high=float(row[2]),
+            low=float(row[3]),
+            close=float(row[4]),
+            volume=float(row[5] or 0.0),
+        )
+        for row in (raw or [])
+    ]
+
+    payload = {"symbol": ccxt_symbol, "timeframe": timeframe, "candles": [c.model_dump() for c in candles]}
+    await _short_ttl_set(cache, cache_key, payload, ttl_seconds=ttl)
+    return CandlesResponse(**payload)
 
 
 # ---------------------------------------------------------------------------

@@ -206,6 +206,66 @@ export interface ForecastHistoryPage {
   items: ForecastHistoryEntry[];
 }
 
+// --- Phase 5: chart foundation (candles) + the "current forecast" shape ---
+
+export interface ForecastResponse {
+  forecast_id: string;
+  symbol: string;
+  timeframe: string;
+  direction: 'bullish' | 'bearish' | 'neutral';
+  confidence_pct: number;
+  bull_probability: number;
+  bear_probability: number;
+  neutral_probability: number;
+  predicted_low: number;
+  predicted_high: number;
+  risk_score: number;
+  market_regime: string;
+  model_contributions: Record<string, number>;
+  supporting_evidence: string[];
+  contradicting_evidence: string[];
+  created_at: string;
+  expiry_at: string;
+}
+
+export interface DashboardEntry {
+  timeframe: string;
+  direction: 'bullish' | 'bearish' | 'neutral';
+  confidence_pct: number;
+  bull_probability: number;
+  bear_probability: number;
+  predicted_low: number;
+  predicted_high: number;
+  risk_score: number;
+  market_regime: string;
+  created_at: string;
+  expiry_at: string;
+  forecast_id: string | null;
+}
+
+export interface ForecastDashboard {
+  symbol: string;
+  generated_at: string;
+  overall_bias: string;
+  overall_confidence_pct: number;
+  timeframes: DashboardEntry[];
+}
+
+export interface Candle {
+  time: number; // unix seconds
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface CandlesResponse {
+  symbol: string;
+  timeframe: string;
+  candles: Candle[];
+}
+
 // --- Phase 4: agent performance ---
 
 export interface AgentPerformance {
@@ -592,6 +652,11 @@ export const api = {
 
   forecasts: {
     explain: (forecastId: string) => fetchAPI<ForecastExplanation>(`/forecasts/${forecastId}/explain`),
+    getById: (forecastId: string) => fetchAPI<ForecastResponse>(`/forecasts/${forecastId}`),
+    getLatest: (symbol: string, timeframe = '1h') =>
+      fetchAPI<ForecastResponse>(`/forecasts?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}`),
+    getDashboard: (symbol: string) =>
+      fetchAPI<ForecastDashboard>(`/forecasts/dashboard?symbol=${encodeURIComponent(symbol)}`),
     history: (params?: {
       symbol?: string;
       timeframe?: string;
@@ -678,6 +743,8 @@ export const api = {
       fetchAPI<OrderBookResponse>(`/markets/${encodeURIComponent(symbol)}/orderbook?depth=${depth}`),
     getFunding: (symbol: string) =>
       fetchAPI<FundingResponse>(`/markets/${encodeURIComponent(symbol)}/funding`),
+    getCandles: (symbol: string, timeframe = '1h', limit = 300) =>
+      fetchAPI<CandlesResponse>(`/markets/${encodeURIComponent(symbol)}/candles?timeframe=${timeframe}&limit=${limit}`),
     getFearGreed: () => fetchAPI<FearGreedResponse>('/markets/fear-greed'),
     getWhaleActivity: () => fetchAPI<ProviderGatedResponse>('/markets/whale-activity'),
     getExchangeFlows: () => fetchAPI<ProviderGatedResponse>('/markets/exchange-flows'),
