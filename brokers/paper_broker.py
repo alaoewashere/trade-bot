@@ -23,6 +23,7 @@ from typing import Literal, Optional
 import redis.asyncio as aioredis
 
 from brokers.base_broker import BaseBroker, OrderResult
+from data.tick_cache import TickCache
 
 logger = logging.getLogger(__name__)
 
@@ -456,11 +457,17 @@ class PaperBroker(BaseBroker):
 
     async def _get_price(self, symbol: str) -> float:
         """
-        Resolve the current price from the Redis market data cache.
-
-        Probes the most common timeframes in order; returns 0.0 if nothing
-        is cached (caller should handle this as a pricing failure).
+        Resolve the current price, preferring the live WS tick cache (sub-
+        second freshness) over the REST-polled candle cache, since the tick
+        cache is the same source the staleness gate already vouches for.
         """
+        tick_cache = TickCache(redis_client=self.redis)
+        tick = await tick_cache.get_tick(symbol)
+        if tick and tick.get("price"):
+            price = float(tick["price"])
+            if price > 0:
+                return price
+
         for tf in ("1m", "5m", "1h"):
             safe_symbol = symbol.replace("/", "_").upper()
             key = f"market:{safe_symbol}:{tf}:latest"
