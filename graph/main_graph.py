@@ -530,12 +530,16 @@ def build_graph():
 if __name__ == "__main__":
     import structlog
 
+    import logging as _logging
+
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
             structlog.stdlib.add_logger_name,
             structlog.dev.ConsoleRenderer(),
-        ]
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
     )
 
     settings = get_settings()
