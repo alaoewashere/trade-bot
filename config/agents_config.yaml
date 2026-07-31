@@ -1,0 +1,338 @@
+# ---------------------------------------------------------------------------
+# agents_config.yaml
+# Hedge Fund AI – Agent Configuration
+# ---------------------------------------------------------------------------
+# Agents marked with model: claude-opus-4-7 perform complex multi-step
+# reasoning, debate moderation, or cross-domain synthesis.
+# All other agents use claude-sonnet-4-6 for speed and cost efficiency.
+# ---------------------------------------------------------------------------
+
+defaults:
+  model: claude-sonnet-4-6
+  max_tokens: 4096
+  temperature: 0.2
+  timeout_seconds: 120
+
+agents:
+  # -------------------------------------------------------------------------
+  # Executive / C-Suite
+  # -------------------------------------------------------------------------
+  cio_agent:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Chief Investment Officer. Sets portfolio strategy, reviews all trade
+      proposals, synthesises input from every sub-agent, and makes final
+      recommendations to the human trader.
+
+  risk_manager:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Enforces hard risk limits (daily loss, position size, leverage),
+      monitors open positions in real-time, and triggers the kill-switch
+      when thresholds are breached.
+
+  portfolio_manager:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Manages overall portfolio allocation, tracks open PnL and exposure,
+      rebalances weights across strategies, and maintains correlation matrices.
+
+  # -------------------------------------------------------------------------
+  # Market Intelligence
+  # -------------------------------------------------------------------------
+  macro_economist:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Analyses macro-economic trends: central bank policy, inflation, GDP,
+      yield curves, and geopolitical risk. Provides top-down directional bias.
+
+  news_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Scans real-time news feeds, earnings releases, and press statements.
+      Classifies sentiment, identifies market-moving events, and flags
+      blackout windows.
+
+  sentiment_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Aggregates social-media sentiment (Twitter/X, Reddit, Stocktwits),
+      Fear & Greed index, and put/call ratios to gauge crowd psychology.
+
+  fundamental_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Evaluates company fundamentals: P/E, EV/EBITDA, revenue growth,
+      margin trends, and balance-sheet health for equities in the universe.
+
+  # -------------------------------------------------------------------------
+  # Technical Analysis
+  # -------------------------------------------------------------------------
+  technical_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Primary technical analyst. Reads chart patterns, support/resistance,
+      moving averages, RSI, MACD, Bollinger Bands, and volume profile.
+
+  wyckoff_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Specialist in Wyckoff market-cycle methodology: identifies
+      accumulation, distribution, mark-up, and mark-down phases.
+
+  elliott_wave_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Applies Elliott Wave Theory to map impulse and corrective structures,
+      Fibonacci projections, and wave-count probabilities.
+
+  multi_timeframe_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Aligns signals across 1 m, 5 m, 15 m, 1 h, 4 h, and 1 D timeframes.
+      Resolves conflicts and produces a consolidated directional bias.
+
+  # -------------------------------------------------------------------------
+  # Quantitative / Statistical
+  # -------------------------------------------------------------------------
+  quant_researcher:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Develops quantitative strategies: statistical arbitrage, mean-reversion,
+      factor models, and systematic signals. Runs hypothesis tests and backtests.
+
+  ml_researcher:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Designs, trains, and evaluates machine-learning forecasting models
+      (gradient boosting, LSTM, transformer ensembles). Manages MLflow
+      experiment tracking and model registry.
+
+  statistical_arb_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Monitors cointegrated pairs and baskets. Calculates z-scores,
+      hedge ratios, and mean-reversion entry/exit triggers.
+
+  # -------------------------------------------------------------------------
+  # Options
+  # -------------------------------------------------------------------------
+  options_strategist:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Designs options strategies (spreads, condors, butterflies, straddles)
+      based on volatility surface, skew, and directional view.
+
+  volatility_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Models implied vs realised volatility, VIX term structure, VVIX,
+      and volatility-regime transitions for options and hedging.
+
+  greeks_manager:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Monitors and manages portfolio Greeks (delta, gamma, theta, vega, rho),
+      triggers rehedging when thresholds are exceeded.
+
+  # -------------------------------------------------------------------------
+  # Crypto Specialist
+  # -------------------------------------------------------------------------
+  crypto_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Lead crypto analyst. Covers BTC, ETH, and altcoins across spot
+      and derivatives markets. Integrates on-chain and off-chain signals.
+
+  onchain_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Analyses on-chain metrics: SOPR, NUPL, exchange flows, miner revenue,
+      whale wallet activity, and stablecoin flows from Glassnode/CryptoQuant.
+
+  defi_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Monitors DeFi protocol metrics: TVL, liquidity depth, lending rates,
+      protocol revenue, and smart-contract risk relevant to crypto positions.
+
+  crypto_derivatives_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Reads crypto futures basis, perpetual funding rates, open interest,
+      liquidation heatmaps, and options skew for directional and hedging signals.
+
+  # -------------------------------------------------------------------------
+  # Strategy
+  # -------------------------------------------------------------------------
+  trend_following_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Identifies and rides established trends using moving-average crossovers,
+      ADX, and momentum indicators across multiple timeframes.
+
+  mean_reversion_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Fades extended moves using Bollinger Band reversions, RSI extremes,
+      and z-score models. Primarily active in range-bound regimes.
+
+  breakout_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Detects and trades high-probability breakouts from consolidation patterns
+      (flags, wedges, triangles) with volume confirmation.
+
+  # -------------------------------------------------------------------------
+  # Execution
+  # -------------------------------------------------------------------------
+  execution_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 2048
+    description: >
+      Translates approved trade proposals into broker orders. Manages order
+      types, partial fills, retries, and reports execution quality.
+
+  order_flow_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Analyses level-2 order book, tape reading, iceberg detection,
+      and dark-pool prints to improve entry/exit timing.
+
+  # -------------------------------------------------------------------------
+  # Monitoring / Surveillance
+  # -------------------------------------------------------------------------
+  performance_monitor:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Tracks real-time and historical performance metrics: Sharpe, Sortino,
+      Calmar, win rate, and equity curves. Publishes to Prometheus/Grafana.
+
+  anomaly_detector:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Flags statistical anomalies in price action, volume spikes, latency
+      outliers, and unexpected PnL swings that may signal data or execution errors.
+
+  # -------------------------------------------------------------------------
+  # Security / Compliance
+  # -------------------------------------------------------------------------
+  compliance_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Checks proposed trades against regulatory constraints, wash-trade rules,
+      pattern-day-trader limits, and internal compliance policies.
+
+  security_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Monitors API key usage, detects unusual authentication activity,
+      validates order integrity, and raises alerts on potential account compromise.
+
+  # -------------------------------------------------------------------------
+  # Coordination / Meta-agents
+  # -------------------------------------------------------------------------
+  debate_moderator:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Facilitates structured debate between bull and bear agents. Ensures
+      both sides surface their strongest evidence, then summarises the debate
+      for the consensus engine.
+
+  consensus_engine:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Aggregates weighted signals from all agents, resolves conflicts via
+      Bayesian updating and majority voting, and produces a final consensus
+      score and trade direction recommendation.
+
+  learning_agent:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Reviews closed trades and forecast outcomes, identifies systematic
+      errors, updates agent weights, and recommends strategy improvements.
+
+  position_expert:
+    model: claude-opus-4-7
+    max_tokens: 8192
+    description: >
+      Deep-dives into specific open positions: sizes up/down recommendations,
+      manages scaling plans, and determines optimal exit sequences.
+
+  regime_detector:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Classifies the current market regime (trending, ranging, volatile,
+      accumulation, distribution, low-volatility) to route signals to the
+      appropriate strategy agents.
+
+  correlation_monitor:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Maintains live pairwise correlation matrix across the trading universe.
+      Warns when portfolio concentration or crowded-trade risk rises.
+
+  liquidity_analyst:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Assesses market liquidity: bid-ask spreads, volume relative to ADV,
+      market-impact estimates, and illiquidity risk for each symbol.
+
+  event_calendar_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 2048
+    description: >
+      Maintains awareness of the economic and earnings event calendar.
+      Pre-populates blackout windows and alerts the orchestrator ahead of
+      high-impact releases.
+
+  data_quality_agent:
+    model: claude-sonnet-4-6
+    max_tokens: 2048
+    description: >
+      Validates incoming market data for stale prices, gaps, incorrect OHLCV
+      relationships, and feed outages. Halts dependent agents when data quality
+      falls below acceptable thresholds.
+
+  alpha_researcher:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    description: >
+      Continuously searches for new alpha sources: academic literature,
+      alternative data sets, and emerging market anomalies. Proposes
+      candidates to the quant_researcher for rigorous testing.

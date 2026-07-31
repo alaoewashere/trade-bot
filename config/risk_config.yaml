@@ -1,0 +1,125 @@
+# ---------------------------------------------------------------------------
+# risk_config.yaml
+# Hedge Fund AI – Risk Management Configuration
+# ---------------------------------------------------------------------------
+# All monetary values are in USD unless explicitly noted.
+# This file is read at startup; changes require a service restart.
+# ---------------------------------------------------------------------------
+
+limits:
+  # --- Portfolio-level loss limits ----------------------------------------
+  max_daily_loss_usd: 500          # Hard stop: close all positions when hit
+  max_weekly_loss_usd: 1500        # Warning at 80 %, hard stop at 100 %
+  max_monthly_drawdown_usd: 5000   # Drawdown from rolling monthly equity peak
+
+  # --- Per-trade / per-position limits ------------------------------------
+  max_position_size_usd: 100       # Maximum notional value per open position
+  max_leverage: 1.0                # Leverage cap (1.0 = spot only, no margin)
+  max_open_positions: 10           # Total simultaneous open positions
+  max_positions_per_symbol: 2      # Simultaneous positions in the same symbol
+  max_correlated_exposure: 0.4     # Max combined weight for correlated assets (0–1)
+
+  # --- Concentration limits -----------------------------------------------
+  max_single_asset_pct: 0.20       # No single asset > 20 % of portfolio
+  max_sector_pct: 0.40             # No sector > 40 % of portfolio
+  max_crypto_pct: 0.50             # Crypto sub-portfolio cap
+  max_equity_pct: 0.70             # Equity sub-portfolio cap
+  max_forex_pct: 0.30              # Forex / FX sub-portfolio cap
+
+  # --- Volatility / risk metrics ------------------------------------------
+  max_portfolio_var_95: 0.03       # Max 1-day 95 % VaR as fraction of equity
+  max_portfolio_cvar_95: 0.05      # Max 1-day 95 % CVaR as fraction of equity
+  min_sharpe_ratio: 0.5            # Below this Sharpe on recent trades → reduce size
+  max_drawdown_pct: 0.10           # Max rolling drawdown (10 %) before scaling back
+
+  # --- Order-level constraints --------------------------------------------
+  min_trade_size_usd: 10           # Reject orders below this notional
+  max_slippage_pct: 0.005          # Cancel order if estimated slippage exceeds 0.5 %
+  max_spread_pct: 0.002            # Skip market if bid-ask spread > 0.2 %
+
+execution:
+  # --- Order routing & timing ---------------------------------------------
+  default_order_type: limit        # 'market' or 'limit'
+  limit_order_offset_pct: 0.001    # Place limit 0.1 % inside best bid/ask
+  order_timeout_seconds: 30        # Cancel unfilled limit after this many seconds
+  retry_on_timeout: true
+  max_retries: 3
+  retry_delay_seconds: 5
+
+  # --- Slippage model -----------------------------------------------------
+  slippage_model: linear           # 'linear', 'square_root', or 'fixed'
+  slippage_factor: 0.0002          # Basis points per unit of normalised volume
+
+  # --- Position sizing model ----------------------------------------------
+  sizing_method: kelly_half        # 'kelly_full', 'kelly_half', 'fixed_usd', 'fixed_pct'
+  fixed_position_usd: 50           # Used when sizing_method = fixed_usd
+  fixed_position_pct: 0.02         # Used when sizing_method = fixed_pct
+  kelly_max_fraction: 0.25         # Cap Kelly bet fraction at 25 %
+
+  # --- Stop-loss / take-profit defaults -----------------------------------
+  default_stop_loss_pct: 0.02      # 2 % stop-loss below entry by default
+  default_take_profit_ratio: 2.0   # TP = SL distance × this ratio (risk:reward)
+  use_trailing_stop: false
+  trailing_stop_pct: 0.015         # Trailing distance when enabled
+
+blackout:
+  # --- Pre / post high-impact news event trading blackout ----------------
+  enabled: true
+  pre_event_minutes: 30            # Stop new entries 30 min before event
+  post_event_minutes: 15           # Resume entries 15 min after event
+
+  # --- Scheduled quiet hours (UTC) ----------------------------------------
+  quiet_hours_utc:
+    - start: "22:00"
+      end: "01:00"
+      label: "weekend_rollover"
+
+  # --- Events that trigger automatic blackout (regex matched) --------------
+  high_impact_keywords:
+    - "FOMC"
+    - "Non-Farm Payroll"
+    - "CPI"
+    - "GDP"
+    - "Interest Rate Decision"
+    - "ECB"
+    - "Bank of England"
+    - "Jerome Powell"
+    - "Janet Yellen"
+    - "US Election"
+    - "Fed Minutes"
+
+circuit_breaker:
+  # --- Consecutive-loss circuit breakers ----------------------------------
+  max_consecutive_losses: 5        # Pause trading after N losses in a row
+  pause_duration_minutes: 60       # How long to pause trading
+
+  # --- Rapid loss circuit breakers ----------------------------------------
+  rapid_loss_window_minutes: 15    # Observation window
+  rapid_loss_threshold_usd: 200    # Trigger if more than this is lost in the window
+
+  # --- Market condition circuit breakers -----------------------------------
+  halt_on_flash_crash: true
+  flash_crash_pct: 0.05            # Single-candle drop > 5 % → halt
+  halt_on_exchange_error: true
+  max_api_errors_per_minute: 10    # Too many errors → halt and alert
+
+  # --- Recovery conditions ------------------------------------------------
+  require_human_approval_to_resume: false
+  auto_resume_after_minutes: 60
+
+kill_switch:
+  # --- Emergency kill switch ----------------------------------------------
+  # When triggered, ALL open positions are closed immediately at market price
+  # and no new orders are placed until manually reset.
+  enabled: true
+  triggers:
+    daily_loss_exceeded: true      # Auto-trigger on max_daily_loss_usd breach
+    weekly_loss_exceeded: true     # Auto-trigger on max_weekly_loss_usd breach
+    monthly_drawdown_exceeded: true
+    manual: true                   # Human can trigger via API endpoint
+
+  # --- Notification channels on kill-switch trigger -----------------------
+  notify:
+    log: true
+    redis_pubsub_channel: "risk:kill_switch"
+    webhook_url: ""                # Optional external webhook (Slack, PagerDuty, etc.)
