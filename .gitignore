@@ -14,3 +14,4 @@ htmlcov/
 node_modules/
 .next/
 mlruns/
+.claude/worktrees/
