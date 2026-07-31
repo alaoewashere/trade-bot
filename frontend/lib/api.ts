@@ -47,6 +47,110 @@ export interface PortfolioMetrics {
   active_agents: number;
 }
 
+export interface RiskAssessment {
+  assessment_id: string;
+  symbol: string;
+  direction: string;
+  approved: boolean;
+  position_size_usd: number;
+  position_size_units: number;
+  entry_price: number;
+  stop_loss: number;
+  take_profit: number;
+  risk_reward: number;
+  max_risk_usd: number;
+  portfolio_heat_pct: number;
+  var_95: number;
+  cvar_95: number;
+  kelly_fraction: number;
+  expected_value_usd: number;
+  risk_category: 'very_low' | 'low' | 'medium' | 'high' | 'extreme';
+  correlation_check: boolean;
+  liquidity_check: boolean;
+  rejection_reasons: string[];
+  consensus_confidence_pct: number | null;
+  created_at: string;
+}
+
+export interface RiskHeatmapEntry {
+  symbol: string;
+  position_size_usd: number;
+  risk_usd: number;
+  heat_pct: number;
+  var_95_usd: number;
+  direction: string;
+}
+
+export interface PortfolioHeatmap {
+  total_heat_pct: number;
+  equity_usd: number;
+  positions: RiskHeatmapEntry[];
+  calculated_at: string;
+}
+
+export interface VaRSummary {
+  portfolio_var_95_usd: number;
+  portfolio_var_99_usd: number;
+  worst_position_var_usd: string | null;
+  total_positions_value_usd: number;
+  methodology: string;
+  calculated_at: string;
+}
+
+export interface JournalEntry {
+  id: string;
+  trade_id: string | null;
+  symbol: string;
+  direction: string;
+  entry_price: number | null;
+  exit_price: number | null;
+  opened_at: string | null;
+  closed_at: string | null;
+  outcome: 'WIN' | 'LOSS' | 'BE' | null;
+  pnl_usd: number | null;
+  ai_consensus_direction: string | null;
+  ai_confidence_pct: number | null;
+  agent_opinions: unknown[];
+  market_regime: string | null;
+  risk_score: number | null;
+  emotional_notes: string | null;
+  execution_notes: string | null;
+  lessons_learned: string | null;
+  created_at: string;
+}
+
+export interface ForecastExplanation {
+  forecast_id: string;
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  confidence_pct: number;
+  final_thesis: string;
+  supporting_evidence: string[];
+  contradicting_evidence: string[];
+  departments: {
+    department: string;
+    agents: {
+      agent_id: string;
+      signal: string;
+      confidence_pct: number;
+      reasoning: string | null;
+      outcome: string;
+      decided_at: string;
+    }[];
+    avg_confidence_pct: number;
+    dominant_signal: string;
+  }[];
+  agreement: {
+    total_agents: number;
+    agreeing_agents: number;
+    disagreeing_agents: number;
+    agreement_pct: number;
+    dissenting_agent_ids: string[];
+  };
+  generated_at: string;
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: {
@@ -81,6 +185,45 @@ export const api = {
 
   portfolio: {
     getMetrics: () => fetchAPI<PortfolioMetrics>('/portfolio/metrics'),
+  },
+
+  risk: {
+    getAssessments: (params?: { symbol?: string; approved_only?: boolean; rejected_only?: boolean; limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.approved_only) qs.set('approved_only', 'true');
+      if (params?.rejected_only) qs.set('rejected_only', 'true');
+      if (params?.limit) qs.set('limit', String(params.limit));
+      if (params?.offset) qs.set('offset', String(params.offset));
+      const q = qs.toString();
+      return fetchAPI<RiskAssessment[]>(`/risk/assessments${q ? `?${q}` : ''}`);
+    },
+    getHeatmap: () => fetchAPI<PortfolioHeatmap>('/risk/heatmap'),
+    getVar: () => fetchAPI<VaRSummary>('/risk/var'),
+  },
+
+  journal: {
+    list: (params?: { symbol?: string; outcome?: string; since?: string; until?: string; search?: string; limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.outcome) qs.set('outcome', params.outcome);
+      if (params?.since) qs.set('since', params.since);
+      if (params?.until) qs.set('until', params.until);
+      if (params?.search) qs.set('search', params.search);
+      if (params?.limit) qs.set('limit', String(params.limit));
+      if (params?.offset) qs.set('offset', String(params.offset));
+      const q = qs.toString();
+      return fetchAPI<JournalEntry[]>(`/journal${q ? `?${q}` : ''}`);
+    },
+    getById: (id: string) => fetchAPI<JournalEntry>(`/journal/${id}`),
+    create: (entry: Partial<JournalEntry> & { symbol: string; direction: string }) =>
+      fetchAPI<JournalEntry>('/journal', { method: 'POST', body: JSON.stringify(entry) }),
+    update: (id: string, patch: Pick<Partial<JournalEntry>, 'emotional_notes' | 'execution_notes' | 'lessons_learned' | 'outcome'>) =>
+      fetchAPI<JournalEntry>(`/journal/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  },
+
+  forecasts: {
+    explain: (forecastId: string) => fetchAPI<ForecastExplanation>(`/forecasts/${forecastId}/explain`),
   },
 
   system: {

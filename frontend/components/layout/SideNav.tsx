@@ -5,7 +5,7 @@ import {
   LayoutDashboard, TrendingUp, Bot, PieChart, Zap,
   Search, BookOpen, BarChart2, History, FlaskConical,
   Newspaper, Settings, ChevronLeft, ChevronRight,
-  Globe, LineChart,
+  Globe, LineChart, ShieldAlert,
 } from 'lucide-react';
 
 interface NavItem {
@@ -22,6 +22,7 @@ const NAV: NavItem[] = [
   { id: 'charts',      label: 'Live Charts',    Icon: TrendingUp },
   { id: 'agents',      label: 'AI Agents',      Icon: Bot,             badge: 40 },
   { id: 'portfolio',   label: 'Portfolio',      Icon: PieChart },
+  { id: 'risk-center', label: 'Risk Center',    Icon: ShieldAlert },
   { id: 'strategies',  label: 'Strategies',     Icon: Zap },
   { id: 'research',    label: 'Research',       Icon: Search,          section: 'RESEARCH' },
   { id: 'journal',     label: 'Journal',        Icon: BookOpen },

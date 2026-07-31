@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import Badge from '@/components/ui/Badge';
+import { api, ForecastExplanation } from '@/lib/api';
 
 const CONFIDENCE = 74;
 const TOTAL_AGENTS = 40;
@@ -62,8 +63,12 @@ function RingGauge({ value, size = 140 }: { value: number; size?: number }) {
   );
 }
 
-export default function ConsensusPanel() {
+export default function ConsensusPanel({ forecastId }: { forecastId?: string } = {}) {
   const [now, setNow] = useState('');
+  const [explainOpen, setExplainOpen] = useState(false);
+  const [explanation, setExplanation] = useState<ForecastExplanation | null>(null);
+  const [explainLoading, setExplainLoading] = useState(false);
+  const [explainError, setExplainError] = useState<string | null>(null);
 
   useEffect(() => {
     const tick = () => setNow(new Date().toLocaleTimeString());
@@ -71,6 +76,20 @@ export default function ConsensusPanel() {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, []);
+
+  const toggleExplain = () => {
+    const next = !explainOpen;
+    setExplainOpen(next);
+    if (next && !explanation && forecastId) {
+      setExplainLoading(true);
+      setExplainError(null);
+      api.forecasts
+        .explain(forecastId)
+        .then(setExplanation)
+        .catch(e => setExplainError(e instanceof Error ? e.message : 'Failed to load explanation'))
+        .finally(() => setExplainLoading(false));
+    }
+  };
 
   return (
     <div
@@ -142,6 +161,76 @@ export default function ConsensusPanel() {
             Regime
           </div>
         </div>
+      </div>
+
+      {/* Explain this decision */}
+      <div>
+        <button
+          onClick={toggleExplain}
+          className="w-full text-xs font-semibold rounded-lg py-2 transition-colors"
+          style={{
+            background: 'rgba(79,124,255,0.08)',
+            border: '1px solid rgba(79,124,255,0.2)',
+            color: '#4F7CFF',
+            cursor: forecastId ? 'pointer' : 'default',
+            opacity: forecastId ? 1 : 0.5,
+          }}
+          disabled={!forecastId}
+        >
+          {explainOpen ? 'Hide explanation ▲' : 'Explain this decision ▼'}
+        </button>
+
+        <AnimatePresence>
+          {explainOpen && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.2 }}
+              className="overflow-hidden"
+            >
+              <div className="pt-3 flex flex-col gap-3 text-xs">
+                {explainLoading && <div style={{ color: '#475569' }}>Loading agent breakdown...</div>}
+                {explainError && <div style={{ color: '#EF4444' }}>{explainError}</div>}
+                {!forecastId && !explainLoading && (
+                  <div style={{ color: '#475569' }}>No forecast selected to explain yet.</div>
+                )}
+                {explanation && (
+                  <>
+                    <div style={{ color: '#94A3B8', lineHeight: 1.5 }}>{explanation.final_thesis}</div>
+                    <div className="flex items-center justify-between" style={{ color: '#475569' }}>
+                      <span>{explanation.agreement.agreeing_agents}/{explanation.agreement.total_agents} agents agree</span>
+                      <span>{explanation.agreement.agreement_pct.toFixed(0)}% agreement</span>
+                    </div>
+                    {explanation.departments.map(dept => (
+                      <div key={dept.department} style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 8 }}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-semibold uppercase tracking-wider" style={{ color: '#CBD5E1', fontSize: 10 }}>
+                            {dept.department.replace('_', ' ')}
+                          </span>
+                          <span style={{ color: '#475569' }}>{dept.dominant_signal} · {dept.avg_confidence_pct.toFixed(0)}%</span>
+                        </div>
+                        {dept.agents.map(a => (
+                          <div key={a.agent_id} className="flex items-start justify-between gap-2 py-0.5">
+                            <span style={{ color: '#64748B' }}>{a.agent_id}</span>
+                            <span style={{ color: a.signal === 'bullish' ? '#22C55E' : a.signal === 'bearish' ? '#EF4444' : '#F59E0B' }}>
+                              {a.signal} ({a.confidence_pct.toFixed(0)}%)
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                    {explanation.agreement.dissenting_agent_ids.length > 0 && (
+                      <div style={{ color: '#F59E0B' }}>
+                        Dissenting: {explanation.agreement.dissenting_agent_ids.join(', ')}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Last updated */}

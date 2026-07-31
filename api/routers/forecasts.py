@@ -541,3 +541,154 @@ async def get_forecast_by_id(
         )
 
     return _row_to_forecast(row)
+
+
+# ---------------------------------------------------------------------------
+# GET /forecasts/{forecast_id}/explain
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{forecast_id}/explain",
+    response_model=ForecastExplanation,
+    summary="Full agent-by-agent explanation of a forecast's consensus",
+    description=(
+        "Aggregates existing agent_decisions and the originating trade_proposal's "
+        "debate_summary/agent_signals (no new agent logic) into a department-grouped "
+        "explanation: who contributed, who agreed vs disagreed, and the final thesis."
+    ),
+)
+async def explain_forecast(
+    forecast_id: str,
+    db: asyncpg.Connection = Depends(get_db),
+) -> ForecastExplanation:
+    forecast = await db.fetchrow(
+        """
+        SELECT forecast_id, symbol, timeframe, direction, confidence_pct,
+               supporting_evidence, contradicting_evidence, created_at, expiry_at
+        FROM forecasts
+        WHERE forecast_id = $1
+        """,
+        forecast_id,
+    )
+    if forecast is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Forecast '{forecast_id}' not found.",
+        )
+
+    import json as _json
+
+    def _parse_list(val: Any) -> list:
+        if isinstance(val, list):
+            return val
+        if isinstance(val, str):
+            try:
+                return _json.loads(val)
+            except Exception:
+                return []
+        return []
+
+    # Agent decisions in the window this forecast covers, for the same symbol.
+    decisions = await db.fetch(
+        """
+        SELECT agent_id, signal, confidence, reasoning, outcome, decided_at
+        FROM agent_decisions
+        WHERE symbol = $1 AND decided_at BETWEEN $2 AND $3
+        ORDER BY decided_at DESC
+        """,
+        forecast["symbol"],
+        forecast["created_at"],
+        forecast["expiry_at"],
+    )
+
+    # Final thesis — pulled from the most recent matching trade_proposal's
+    # debate_summary JSONB rather than re-derived (ConsensusResult.final_thesis
+    # is serialized there when the proposal is persisted).
+    proposal = await db.fetchrow(
+        """
+        SELECT debate_summary
+        FROM trade_proposals
+        WHERE symbol = $1
+        ORDER BY ABS(EXTRACT(EPOCH FROM (proposed_at - $2::TIMESTAMPTZ)))
+        LIMIT 1
+        """,
+        forecast["symbol"],
+        forecast["created_at"],
+    )
+    final_thesis = "No consensus thesis on record for this forecast."
+    if proposal and proposal["debate_summary"]:
+        debate = proposal["debate_summary"]
+        if isinstance(debate, str):
+            try:
+                debate = _json.loads(debate)
+            except Exception:
+                debate = {}
+        if isinstance(debate, dict):
+            final_thesis = debate.get("final_thesis", final_thesis)
+
+    # Group by department
+    by_dept: dict[str, list[AgentContribution]] = {}
+    for d in decisions:
+        dept = _AGENT_DEPARTMENTS.get(d["agent_id"], "other")
+        by_dept.setdefault(dept, []).append(
+            AgentContribution(
+                agent_id=d["agent_id"],
+                signal=d["signal"],
+                confidence_pct=round(float(d["confidence"] or 0.0) * 100.0, 2),
+                reasoning=d["reasoning"],
+                outcome=d["outcome"],
+                decided_at=d["decided_at"].isoformat(),
+            )
+        )
+
+    departments: list[DepartmentGroup] = []
+    for dept, agents in sorted(by_dept.items()):
+        avg_conf = sum(a.confidence_pct for a in agents) / len(agents) if agents else 0.0
+        signal_counts: dict[str, int] = {}
+        for a in agents:
+            signal_counts[a.signal] = signal_counts.get(a.signal, 0) + 1
+        dominant = max(signal_counts, key=signal_counts.get) if signal_counts else "neutral"
+        departments.append(
+            DepartmentGroup(
+                department=dept,
+                agents=agents,
+                avg_confidence_pct=round(avg_conf, 2),
+                dominant_signal=dominant,
+            )
+        )
+
+    # Agreement summary: an agent "agrees" if its signal direction matches the
+    # forecast's overall direction (bullish/bearish), "neutral"/"no_signal" and
+    # opposite-direction agents count as dissenting.
+    direction_signal_map = {"bullish": "bullish", "bearish": "bearish"}
+    forecast_signal = direction_signal_map.get(forecast["direction"], forecast["direction"])
+
+    all_agents = [a for group in departments for a in group.agents]
+    total_agents = len(all_agents)
+    agreeing = [a for a in all_agents if a.signal == forecast_signal]
+    dissenting = [a for a in all_agents if a.signal != forecast_signal]
+
+    agreement = AgreementSummary(
+        total_agents=total_agents,
+        agreeing_agents=len(agreeing),
+        disagreeing_agents=len(dissenting),
+        agreement_pct=round((len(agreeing) / total_agents * 100.0) if total_agents else 0.0, 2),
+        dissenting_agent_ids=[a.agent_id for a in dissenting],
+    )
+
+    from datetime import datetime, timezone
+
+    return ForecastExplanation(
+        forecast_id=str(forecast["forecast_id"]),
+        symbol=forecast["symbol"],
+        timeframe=forecast["timeframe"],
+        direction=forecast["direction"],
+        confidence_pct=float(forecast["confidence_pct"]),
+        final_thesis=final_thesis,
+        supporting_evidence=_parse_list(forecast["supporting_evidence"]),
+        contradicting_evidence=_parse_list(forecast["contradicting_evidence"]),
+        departments=departments,
+        agreement=agreement,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+    )

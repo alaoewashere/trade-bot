@@ -14,6 +14,7 @@ import PerformanceView from '@/components/views/PerformanceView';
 import BacktestingView from '@/components/views/BacktestingView';
 import PaperTradingView from '@/components/views/PaperTradingView';
 import SettingsView from '@/components/views/SettingsView';
+import RiskCenterView from '@/components/views/RiskCenterView';
 
 export default function ViewRouter({ activeView }: { activeView: string }) {
   switch (activeView) {
@@ -23,6 +24,7 @@ export default function ViewRouter({ activeView }: { activeView: string }) {
     case 'charts2':     return <ChartsView />;
     case 'agents':      return <AgentsView />;
     case 'portfolio':   return <PortfolioView />;
+    case 'risk-center': return <RiskCenterView />;
     case 'strategies':  return <StrategiesView />;
     case 'research':    return <ResearchView />;
     case 'journal':     return <JournalView />;
