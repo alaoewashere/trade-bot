@@ -5,6 +5,8 @@ import {
   Zap, Search, Bell, Settings, ChevronDown,
   Wifi, WifiOff, Sun, Moon, Activity,
 } from 'lucide-react';
+import ConnectionStatusIndicator from './ConnectionStatusIndicator';
+import StalenessBanner from './StalenessBanner';
 
 /* ─── Live clock ──────────────────────────────────── */
 function LiveClock() {
@@ -105,6 +107,8 @@ export default function TopBar() {
   const [brokerConnected] = useState(true);
 
   return (
+    <>
+    <StalenessBanner />
     <header
       className="flex-shrink-0 z-50 flex items-center gap-3 px-5"
       style={{
@@ -196,6 +200,9 @@ export default function TopBar() {
         <LiveClock />
       </div>
 
+      {/* ── Live data connection status (Phase 6) ──── */}
+      <ConnectionStatusIndicator />
+
       {/* ── Divider ────────────────────────────────── */}
       <div className="w-px h-6 flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }} />
 
@@ -275,5 +282,6 @@ export default function TopBar() {
         <ChevronDown className="w-3 h-3 flex-shrink-0" style={{ color: '#475569' }} />
       </button>
     </header>
+    </>
   );
 }

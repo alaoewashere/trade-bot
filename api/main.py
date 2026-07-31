@@ -35,6 +35,7 @@ from api.routers import (
     system,
     trades,
 )
+from api.websockets import market_stream
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ async def lifespan(app: FastAPI):
       1. Connect asyncpg pool.
       2. Connect Redis client.
       3. Start background circuit-breaker event subscriber.
+      4. Start background Binance WS tick ingestion (Phase 6).
 
     Shutdown:
       1. Cancel background tasks.
@@ -93,6 +95,28 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("CircuitBreakerSubscriber could not start: %s", exc)
 
+    # ---- Background Binance WS tick ingestion (Phase 6) ----
+    # Runs as an asyncio task in the API process rather than a separate
+    # Docker service: it's a single lightweight persistent socket writing
+    # into Redis, following the exact same pattern as CircuitBreakerSubscriber
+    # above. A dedicated service would only pay off once ingestion needs
+    # independent scaling/restart from the API — not the case yet.
+    ws_feed_task = None
+    try:
+        from api.routers.markets import _DEFAULT_LIVE_SYMBOLS
+        from data.feeds.binance_ws_feed import BinanceWSFeed
+
+        _feed_redis = aioredis.from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+        )
+        ws_feed = BinanceWSFeed(symbols=_DEFAULT_LIVE_SYMBOLS, redis_client=_feed_redis)
+        ws_feed_task = asyncio.create_task(ws_feed.start())
+        logger.info("BinanceWSFeed started for %d symbols.", len(_DEFAULT_LIVE_SYMBOLS))
+    except Exception as exc:
+        logger.warning("BinanceWSFeed could not start: %s", exc)
+
     yield
 
     # ---- Shutdown ----
@@ -100,6 +124,13 @@ async def lifespan(app: FastAPI):
         cb_subscriber_task.cancel()
         try:
             await cb_subscriber_task
+        except asyncio.CancelledError:
+            pass
+
+    if ws_feed_task is not None:
+        ws_feed_task.cancel()
+        try:
+            await ws_feed_task
         except asyncio.CancelledError:
             pass
 
@@ -160,6 +191,7 @@ app.include_router(approvals.router, prefix="/approvals", tags=["Approvals"])
 app.include_router(system.router, prefix="/system", tags=["System"])
 app.include_router(markets.router, prefix="/markets", tags=["Markets"])
 app.include_router(alerts.router, prefix="/alerts", tags=["Alerts"])
+app.include_router(market_stream.router, prefix="/ws", tags=["WebSocket"])
 
 
 # ---------------------------------------------------------------------------

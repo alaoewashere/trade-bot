@@ -544,6 +544,24 @@ export interface ProviderGatedResponse {
   message: string;
 }
 
+export interface SymbolConnectionStatus {
+  symbol: string;
+  ws_status: 'connected' | 'disconnected' | 'reconnecting';
+  latency_ms: number | null;
+  last_tick_at: string | null;
+  age_seconds: number | null;
+  trading_enabled: boolean;
+  reason: string | null;
+}
+
+export interface ConnectionStatusResponse {
+  ws_status: 'connected' | 'disconnected' | 'reconnecting';
+  latency_ms: number | null;
+  trading_enabled: boolean;
+  symbols: SymbolConnectionStatus[];
+  checked_at: string;
+}
+
 export interface AlertRecord {
   id: string;
   created_at: string;
@@ -734,6 +752,8 @@ export const api = {
     killSwitch: () =>
       fetchAPI<{ success: boolean; message: string }>('/system/kill', { method: 'POST' }),
     getStatus: () => fetchAPI<{ status: string; uptime: number }>('/system/status'),
+    getConnectionStatus: () =>
+      fetchAPI<ConnectionStatusResponse>('/system/connection-status'),
   },
 
   markets: {

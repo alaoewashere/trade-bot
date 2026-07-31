@@ -3,6 +3,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { api, LiveTicker, FearGreedResponse, ProviderGatedResponse } from '@/lib/api';
+import { useMarketDataWS } from '@/hooks/useWebSocket';
 
 const WATCHLIST_SYMBOLS = [
   'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
@@ -121,9 +122,28 @@ export default function MarketsView() {
       }
     }
     load();
-    const interval = setInterval(load, 8000);
+    // REST poll interval widened from the original tight loop now that the
+    // live WS tick stream (below) keeps price/change fresh in between —
+    // this call still owns 24h high/low/volume/sentiment fields the tick
+    // stream doesn't carry.
+    const interval = setInterval(load, 30000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
+
+  // Phase 6: live tick stream overlays REST-polled price/change in real
+  // time; high/low/volume stay REST-sourced since the ticker WS payload
+  // doesn't need to duplicate those (24h ticker fields don't change tick-
+  // by-tick the way price does).
+  useMarketDataWS((msg) => {
+    if (msg.type !== 'price' || !msg.symbol || msg.price === undefined) return;
+    setTickers((prev) =>
+      prev.map((t) =>
+        t.symbol === msg.symbol
+          ? { ...t, price: msg.price!, change_24h_pct: msg.change_pct ?? t.change_24h_pct }
+          : t
+      )
+    );
+  });
 
   return (
     <motion.div

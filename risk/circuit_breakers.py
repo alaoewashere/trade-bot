@@ -11,6 +11,8 @@ Custom exceptions
 -----------------
 KillSwitchActiveError   — raised when the kill switch is armed.
 CircuitBreakerTrippedError — raised when the circuit breaker is open.
+StaleMarketDataError    — raised when live market data for a symbol is
+                          disconnected or older than the freshness window.
 
 Classes
 -------
@@ -18,6 +20,10 @@ KillSwitch              — manual emergency stop.
 CircuitBreaker          — automatic loss-based stop.
 SafetyGate              — composite of both; single entry-point for nodes.
 CircuitBreakerSubscriber — async listener for published events.
+MarketDataStalenessGate — Phase 6 safety primitive: blocks trading on a
+                          symbol when its live WS tick feed is dead or
+                          stale. Nothing calls this yet in anger — Phase 7
+                          (execution engine) wires it into the order path.
 """
 
 from __future__ import annotations
@@ -48,6 +54,16 @@ _DAILY_PNL_KEY = "risk:daily_pnl"
 _CONSECUTIVE_LOSSES_KEY = "risk:consecutive_losses"
 _PUBSUB_CHANNEL = "risk:circuit_breaker:events"
 
+# Market-data staleness rule (Phase 6): a symbol's live feed is considered
+# stale — and trading on it must be blocked — once its last tick is older
+# than this many seconds, OR the WS connection itself is not "connected".
+# This is a per-symbol check: one dead symbol does not halt unrelated
+# symbols whose ticks are still fresh, but a fully disconnected socket
+# means every watched symbol is stale simultaneously (there is only one
+# shared connection, so "disconnected" fails every symbol's check).
+MARKET_DATA_STALENESS_SECONDS = 2.0
+_WS_CONNECTION_STATUS_KEY = "market:ws:connection"
+
 
 # ---------------------------------------------------------------------------
 # Custom exceptions
@@ -68,6 +84,23 @@ class CircuitBreakerTrippedError(RuntimeError):
     def __init__(self, reason: str = "Circuit breaker is tripped.") -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class StaleMarketDataError(RuntimeError):
+    """
+    Raised when an operation is blocked because live market data for a
+    symbol is disconnected or older than MARKET_DATA_STALENESS_SECONDS.
+
+    Mirrors KillSwitchActiveError's shape: a plain RuntimeError subclass
+    carrying a human-readable ``reason`` plus the ``symbol`` and measured
+    ``age_seconds`` (None when there is no tick at all / feed never connected).
+    """
+
+    def __init__(self, symbol: str, reason: str, age_seconds: float | None = None) -> None:
+        super().__init__(reason)
+        self.symbol = symbol
+        self.reason = reason
+        self.age_seconds = age_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +493,143 @@ class SafetyGate:
             "all_clear": all_clear,
             "checked_at": _utcnow_iso(),
         }
+
+
+# ---------------------------------------------------------------------------
+# MarketDataStalenessGate
+# ---------------------------------------------------------------------------
+
+
+class MarketDataStalenessGate:
+    """
+    Phase 6 safety primitive: the single shared function any future
+    execution code must call before permitting a trade on a symbol whose
+    price depends on the live WS tick stream.
+
+    Contract
+    --------
+    ``trading_enabled(symbol) -> bool`` and ``assert_fresh_or_raise(symbol) -> None``
+    both apply the *same* rule, evaluated per-symbol:
+
+        stale  =  (WS connection status != "connected")
+                  OR (no tick has ever been received for `symbol`)
+                  OR (now - last_tick_timestamp) > MARKET_DATA_STALENESS_SECONDS (2.0s)
+
+    When the shared WS connection itself is down, every watched symbol
+    reads as stale simultaneously (there's one socket, not one per
+    symbol) — this is intentional: a global outage should block all
+    symbols, while one symbol's feed going quiet (e.g. a delisted pair)
+    should only block that symbol.
+
+    This class only reads state — it does not open connections or run
+    the feed itself (see data/feeds/binance_ws_feed.py for that). It is
+    Redis-backed like KillSwitch/CircuitBreaker so any process can call
+    it without needing an in-process reference to the WS client.
+
+    Usage (future — Phase 7 execution engine)::
+
+        gate = MarketDataStalenessGate(redis_client)
+        await gate.assert_fresh_or_raise("BTC/USDT")  # raises StaleMarketDataError if stale
+        # ... proceed to submit the order ...
+    """
+
+    def __init__(self, redis: aioredis.Redis, tick_cache: Any = None) -> None:
+        self._redis = redis
+        if tick_cache is None:
+            from data.tick_cache import TickCache  # local import: avoids a hard import-time cycle
+            tick_cache = TickCache(redis_client=redis)
+        self._tick_cache = tick_cache
+
+    async def _connection_status(self) -> dict[str, Any]:
+        raw = await self._redis.get(_WS_CONNECTION_STATUS_KEY)
+        if raw is None:
+            return {"status": "disconnected", "latency_ms": None, "reason": "no_ws_process_running"}
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {"status": "disconnected", "latency_ms": None, "reason": "corrupt_status"}
+
+    async def get_symbol_status(self, symbol: str) -> dict[str, Any]:
+        """
+        Return a full diagnostic dict for one symbol:
+        ``{symbol, ws_status, latency_ms, last_tick_at, age_seconds, trading_enabled, reason}``.
+
+        Used both by ``assert_fresh_or_raise`` and by
+        GET /system/connection-status so the API and the enforcement path
+        can never disagree about what "fresh" means.
+        """
+        conn = await self._connection_status()
+        ws_status = conn.get("status", "disconnected")
+        age = await self._tick_cache.age_seconds(symbol)
+        tick = await self._tick_cache.get_tick(symbol)
+        last_tick_at = (
+            datetime.fromtimestamp(tick["ts"], tz=timezone.utc).isoformat() if tick else None
+        )
+
+        if ws_status != "connected":
+            return {
+                "symbol": symbol,
+                "ws_status": ws_status,
+                "latency_ms": conn.get("latency_ms"),
+                "last_tick_at": last_tick_at,
+                "age_seconds": age,
+                "trading_enabled": False,
+                "reason": f"WS connection is '{ws_status}', not 'connected'.",
+            }
+        if age is None:
+            return {
+                "symbol": symbol,
+                "ws_status": ws_status,
+                "latency_ms": conn.get("latency_ms"),
+                "last_tick_at": None,
+                "age_seconds": None,
+                "trading_enabled": False,
+                "reason": "No tick has ever been received for this symbol.",
+            }
+        if age > MARKET_DATA_STALENESS_SECONDS:
+            return {
+                "symbol": symbol,
+                "ws_status": ws_status,
+                "latency_ms": conn.get("latency_ms"),
+                "last_tick_at": last_tick_at,
+                "age_seconds": age,
+                "trading_enabled": False,
+                "reason": (
+                    f"Last tick is {age:.2f}s old, exceeding the "
+                    f"{MARKET_DATA_STALENESS_SECONDS:.1f}s staleness limit."
+                ),
+            }
+        return {
+            "symbol": symbol,
+            "ws_status": ws_status,
+            "latency_ms": conn.get("latency_ms"),
+            "last_tick_at": last_tick_at,
+            "age_seconds": age,
+            "trading_enabled": True,
+            "reason": None,
+        }
+
+    async def trading_enabled(self, symbol: str) -> bool:
+        """Return True iff *symbol*'s live data is fresh enough to trade on."""
+        status = await self.get_symbol_status(symbol)
+        return bool(status["trading_enabled"])
+
+    async def assert_fresh_or_raise(self, symbol: str) -> None:
+        """
+        Raise StaleMarketDataError if *symbol*'s live data is stale or the
+        feed is disconnected. Returns None (no-op) when data is fresh.
+
+        Call this at the top of any order-submission code path that
+        depends on live pricing for `symbol` — mirrors
+        KillSwitch.check_or_raise() / CircuitBreaker.check_or_raise().
+        """
+        status = await self.get_symbol_status(symbol)
+        if not status["trading_enabled"]:
+            raise StaleMarketDataError(
+                symbol=symbol,
+                reason=status["reason"] or "Market data is stale.",
+                age_seconds=status["age_seconds"],
+            )
 
 
 # ---------------------------------------------------------------------------

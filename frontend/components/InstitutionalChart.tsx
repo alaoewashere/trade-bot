@@ -13,6 +13,7 @@ import {
   Time,
 } from 'lightweight-charts';
 import { api, Candle, ForecastResponse, ForecastHistoryEntry, RiskAssessment } from '@/lib/api';
+import { useMarketDataWS } from '@/hooks/useWebSocket';
 
 // Palette already used throughout the codebase (Badge.tsx, ChartsView, ChartSection)
 const BULLISH = '#22C55E';
@@ -77,6 +78,7 @@ export default function InstitutionalChart({
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const historyRef = useRef<ForecastHistoryEntry[]>([]);
+  const lastBarRef = useRef<Candle | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -209,6 +211,7 @@ export default function InstitutionalChart({
               }))
             );
           }
+          lastBarRef.current = candles.length ? candles[candles.length - 1] : null;
           setLastPrice(candles.length ? candles[candles.length - 1].close : null);
           chartRef.current?.timeScale().fitContent();
         } else {
@@ -370,6 +373,36 @@ export default function InstitutionalChart({
       cancelled = true;
     };
   }, [symbol, timeframe, secondaryOverlays]);
+
+  // Phase 6: REST candles (above) remain the source of truth for history/
+  // timeframe changes; live ticks only patch the *current* bar's close
+  // (and high/low if the tick exceeds them) via lightweight-charts'
+  // partial-update pattern — series.update() replaces the last bar in
+  // place rather than appending, so this never desyncs from the REST
+  // backfill on symbol/timeframe switch (that effect always runs first
+  // and resets lastBarRef).
+  useMarketDataWS((msg) => {
+    if (msg.type !== 'price' || msg.symbol !== symbol || msg.price === undefined) return;
+    const bar = lastBarRef.current;
+    const series = seriesRef.current;
+    if (!bar || !series) return;
+
+    const updated: Candle = {
+      ...bar,
+      high: Math.max(bar.high, msg.price),
+      low: Math.min(bar.low, msg.price),
+      close: msg.price,
+    };
+    lastBarRef.current = updated;
+    series.update({
+      time: updated.time as Time,
+      open: updated.open,
+      high: updated.high,
+      low: updated.low,
+      close: updated.close,
+    });
+    setLastPrice(msg.price);
+  });
 
   function toggleSecondary(tf: string) {
     setSecondaryOverlays((prev) => {

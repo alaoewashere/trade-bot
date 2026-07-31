@@ -11,9 +11,11 @@ GET  /system/kill-switch/status       — current kill switch state
 GET  /system/circuit-breakers         — circuit breaker state + daily PnL
 POST /system/circuit-breakers/reset   — reset after cooldown
 GET  /system/status                   — full system health snapshot
+GET  /system/connection-status        — live-data WS health + per-symbol staleness (Phase 6)
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -22,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from api.dependencies import get_redis
-from risk.circuit_breakers import CircuitBreaker, KillSwitch, SafetyGate
+from risk.circuit_breakers import CircuitBreaker, KillSwitch, MarketDataStalenessGate, SafetyGate
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -75,6 +77,24 @@ class SystemStatusResponse(BaseModel):
     consecutive_losses: int
     all_clear: bool
     active_agents: int
+    checked_at: str
+
+
+class SymbolConnectionStatus(BaseModel):
+    symbol: str
+    ws_status: str  # "connected" | "disconnected" | "reconnecting"
+    latency_ms: float | None
+    last_tick_at: str | None
+    age_seconds: float | None
+    trading_enabled: bool
+    reason: str | None
+
+
+class ConnectionStatusResponse(BaseModel):
+    ws_status: str
+    latency_ms: float | None
+    trading_enabled: bool  # global AND of every watched symbol — one stale symbol degrades this
+    symbols: list[SymbolConnectionStatus]
     checked_at: str
 
 
@@ -280,4 +300,49 @@ async def system_status(
         all_clear=all_clear,
         active_agents=len(AGENT_REGISTRY_MAP),
         checked_at=composite["checked_at"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Connection status (Phase 6 — live data health / staleness gate)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/connection-status",
+    response_model=ConnectionStatusResponse,
+    summary="Live market-data WS connection health + per-symbol staleness",
+    description=(
+        "Reports the Binance WS ingestion connection status, latency, and "
+        "the MarketDataStalenessGate's trading_enabled verdict for every "
+        "watched symbol. This is the same check any future execution code "
+        "calls via MarketDataStalenessGate.assert_fresh_or_raise(symbol) — "
+        "this endpoint never invents a separate notion of 'fresh'."
+    ),
+)
+async def connection_status(
+    redis: aioredis.Redis = Depends(get_redis),
+) -> ConnectionStatusResponse:
+    from api.routers.markets import _DEFAULT_LIVE_SYMBOLS
+
+    gate = MarketDataStalenessGate(redis)
+    statuses = await asyncio.gather(
+        *(gate.get_symbol_status(s) for s in _DEFAULT_LIVE_SYMBOLS)
+    )
+
+    symbol_models = [SymbolConnectionStatus(**s) for s in statuses]
+    ws_statuses = {s.ws_status for s in symbol_models}
+    overall_ws_status = "connected" if ws_statuses == {"connected"} else (
+        "disconnected" if "disconnected" in ws_statuses else "reconnecting"
+    )
+    latencies = [s.latency_ms for s in symbol_models if s.latency_ms is not None]
+    avg_latency = sum(latencies) / len(latencies) if latencies else None
+    global_trading_enabled = all(s.trading_enabled for s in symbol_models)
+
+    return ConnectionStatusResponse(
+        ws_status=overall_ws_status,
+        latency_ms=avg_latency,
+        trading_enabled=global_trading_enabled,
+        symbols=symbol_models,
+        checked_at=datetime.now(timezone.utc).isoformat(),
     )
