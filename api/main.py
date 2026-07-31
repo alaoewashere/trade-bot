@@ -22,7 +22,7 @@ from api.dependencies import (
     init_db_pool,
     init_redis_pool,
 )
-from api.routers import agents, approvals, forecasts, journal, portfolio, risk, system, trades
+from api.routers import agents, approvals, backtest, forecasts, journal, portfolio, risk, system, trades
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,7 @@ app.mount("/metrics", metrics_app)
 app.include_router(agents.router, prefix="/agents", tags=["Agents"])
 app.include_router(trades.router, prefix="/trades", tags=["Trades"])
 app.include_router(journal.router, prefix="/journal", tags=["Journal"])
+app.include_router(backtest.router, prefix="/backtest", tags=["Backtest"])
 app.include_router(forecasts.router, prefix="/forecasts", tags=["Forecasts"])
 app.include_router(portfolio.router, prefix="/portfolio", tags=["Portfolio"])
 app.include_router(risk.router, prefix="/risk", tags=["Risk"])

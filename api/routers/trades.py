@@ -10,12 +10,15 @@ GET  /trades/open                   — current open positions
 GET  /trades/{trade_id}             — specific trade detail
 GET  /trades/{trade_id}/timeline    — full execution timeline for a trade
 GET  /trades/stats                  — aggregate performance statistics
+GET  /trades/equity-curve           — cumulative equity/drawdown time series
+GET  /trades/calendar               — daily PnL bucketed by date
 POST /trades/{trade_id}/close       — manually close a position (paper only)
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import statistics
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
@@ -74,6 +77,11 @@ class OpenPositionResponse(BaseModel):
     duration_minutes: float
 
 
+class DayPnl(BaseModel):
+    date: str
+    pnl_usd: float
+
+
 class TradeStats(BaseModel):
     total_trades: int
     open_trades: int
@@ -88,6 +96,34 @@ class TradeStats(BaseModel):
     largest_loss_usd: float
     avg_duration_minutes: float
     measured_at: str
+
+    # --- Phase 2 additions (additive only — existing fields above unchanged) ---
+    expectancy_usd: float
+    sharpe_ratio: float | None
+    sortino_ratio: float | None
+    calmar_ratio: float | None
+    max_drawdown_pct: float
+    avg_trade_duration_minutes: float
+    best_day: DayPnl | None
+    worst_day: DayPnl | None
+    equity_usd: float
+    realized_pnl_usd: float
+    unrealized_pnl_usd: float
+    daily_return_pct: float
+    weekly_return_pct: float
+    monthly_return_pct: float
+
+
+class EquityCurvePoint(BaseModel):
+    timestamp: str
+    cumulative_pnl_usd: float
+    drawdown_pct: float
+
+
+class CalendarDay(BaseModel):
+    date: str
+    pnl_usd: float
+    trade_count: int
 
 
 class TradeCloseRequest(BaseModel):
@@ -350,6 +386,112 @@ async def get_open_positions(
     ]
 
 
+async def _fetch_daily_pnl_series(
+    db: asyncpg.Connection,
+    where: str,
+    params: list[Any],
+) -> list[tuple[Any, float]]:
+    """
+    Closed-trade PnL bucketed by the UTC date the trade closed on, ascending.
+    Used as the return series feeding Sharpe/Sortino/Calmar/drawdown/best-worst
+    day — this project has no continuously-marked equity history for closed
+    trades, so daily realized PnL is the best available proxy for a return
+    series.
+    """
+    rows = await db.fetch(
+        f"""
+        SELECT date_trunc('day', closed_at) AS day, SUM(pnl_usd) AS pnl
+        FROM trades
+        {where}
+        GROUP BY day
+        ORDER BY day ASC
+        """,
+        *params,
+    )
+    return [(r["day"], float(r["pnl"] or 0.0)) for r in rows]
+
+
+async def _fetch_equity_usd(db: asyncpg.Connection) -> float | None:
+    """
+    Latest recorded equity, reused from the same `portfolio_equity` table
+    api/routers/portfolio.py reads from (avoids a second source of truth).
+    Returns None if the table doesn't exist / has no rows yet.
+    """
+    try:
+        row = await db.fetchrow(
+            "SELECT equity_usd FROM portfolio_equity ORDER BY recorded_at DESC LIMIT 1"
+        )
+        return float(row["equity_usd"]) if row and row["equity_usd"] is not None else None
+    except Exception:
+        return None
+
+
+# Trading days per year assumed for annualizing Sharpe/Sortino/Calmar.
+# Crypto markets trade continuously (no weekends/holidays), unlike equities'
+# conventional 252 — see module docstring / phase notes.
+_ANNUALIZATION_DAYS = 365
+
+
+def _compute_risk_adjusted_metrics(
+    daily_pnls: list[float],
+    equity_base: float,
+) -> dict[str, float | None]:
+    """
+    Sharpe/Sortino/Calmar computed off daily-bucketed realized PnL expressed
+    as a fraction of `equity_base` (current equity, or the closed-trade PnL
+    range as a fallback when no equity snapshot exists). Risk-free rate is
+    assumed to be 0 — this is a research/analytics figure, not a regulatory
+    one. Annualized using sqrt(365) for Sharpe/Sortino (crypto trades every
+    calendar day).
+    """
+    if not daily_pnls or equity_base <= 0:
+        return {
+            "sharpe_ratio": None,
+            "sortino_ratio": None,
+            "calmar_ratio": None,
+            "max_drawdown_pct": 0.0,
+        }
+
+    daily_returns = [p / equity_base for p in daily_pnls]
+
+    mean_return = statistics.mean(daily_returns)
+    stdev_return = statistics.pstdev(daily_returns) if len(daily_returns) > 1 else 0.0
+    sharpe = (
+        (mean_return / stdev_return) * (_ANNUALIZATION_DAYS ** 0.5)
+        if stdev_return > 0
+        else None
+    )
+
+    downside = [r for r in daily_returns if r < 0]
+    downside_dev = statistics.pstdev(downside) if len(downside) > 1 else (abs(downside[0]) if downside else 0.0)
+    sortino = (
+        (mean_return / downside_dev) * (_ANNUALIZATION_DAYS ** 0.5)
+        if downside_dev > 0
+        else None
+    )
+
+    # Max drawdown off the cumulative equity curve (equity_base + running sum).
+    cumulative = equity_base
+    peak = equity_base
+    max_dd_pct = 0.0
+    for pnl in daily_pnls:
+        cumulative += pnl
+        peak = max(peak, cumulative)
+        if peak > 0:
+            dd_pct = (peak - cumulative) / peak * 100.0
+            max_dd_pct = max(max_dd_pct, dd_pct)
+
+    annualized_return = mean_return * _ANNUALIZATION_DAYS
+    calmar = (annualized_return * 100.0) / max_dd_pct if max_dd_pct > 0 else None
+
+    return {
+        "sharpe_ratio": round(sharpe, 3) if sharpe is not None else None,
+        "sortino_ratio": round(sortino, 3) if sortino is not None else None,
+        "calmar_ratio": round(calmar, 3) if calmar is not None else None,
+        "max_drawdown_pct": round(max_dd_pct, 3),
+    }
+
+
 # ---------------------------------------------------------------------------
 # GET /trades/stats
 # ---------------------------------------------------------------------------
@@ -413,21 +555,203 @@ async def get_trade_stats(
 
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
+    win_rate = wins / total if total > 0 else 0.0
+    avg_win = float(row["avg_win"] or 0.0) if row else 0.0
+    avg_loss = float(row["avg_loss"] or 0.0) if row else 0.0
+    # Expectancy: expected $ per trade given the observed win rate and avg win/loss.
+    expectancy_usd = (win_rate * avg_win) + ((1 - win_rate) * avg_loss)
+
+    daily_series = await _fetch_daily_pnl_series(db, where, params)
+    daily_pnls = [pnl for _, pnl in daily_series]
+
+    equity_usd = await _fetch_equity_usd(db)
+    total_pnl_usd = float(row["total_pnl"] or 0.0) if row else 0.0
+    # Fall back to a synthetic equity base (starting capital implied by
+    # closed PnL) when no portfolio_equity snapshot exists yet, so Sharpe/
+    # Sortino/Calmar remain computable rather than always None.
+    equity_base = equity_usd if equity_usd is not None else max(abs(total_pnl_usd) * 10, 10_000.0)
+
+    risk_metrics = _compute_risk_adjusted_metrics(daily_pnls, equity_base)
+
+    best_day = None
+    worst_day = None
+    if daily_series:
+        best = max(daily_series, key=lambda d: d[1])
+        worst = min(daily_series, key=lambda d: d[1])
+        best_day = DayPnl(date=best[0].date().isoformat(), pnl_usd=round(best[1], 2))
+        worst_day = DayPnl(date=worst[0].date().isoformat(), pnl_usd=round(worst[1], 2))
+
+    # Unrealized PnL from currently open positions (mirrors /trades/open's calc).
+    unrealized_row = await db.fetchrow(
+        """
+        SELECT SUM(
+            CASE
+                WHEN t.direction = 'LONG'  THEN (COALESCE(p.last_price, t.filled_price) - t.filled_price) * t.quantity
+                WHEN t.direction = 'SHORT' THEN (t.filled_price - COALESCE(p.last_price, t.filled_price)) * t.quantity
+                ELSE 0
+            END
+        ) AS unrealized_pnl
+        FROM trades t
+        LEFT JOIN market_prices p ON p.symbol = t.symbol
+        WHERE t.status = 'open'
+        """
+    )
+    unrealized_pnl_usd = float(unrealized_row["unrealized_pnl"] or 0.0) if unrealized_row else 0.0
+
+    def _windowed_pnl(days: int) -> float:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff_pnls = [
+            pnl for day, pnl in daily_series
+            if (day if day.tzinfo else day.replace(tzinfo=timezone.utc)) >= cutoff
+        ]
+        return sum(cutoff_pnls)
+
+    daily_pnl = daily_series[-1][1] if daily_series else 0.0
+    weekly_pnl = _windowed_pnl(7)
+    monthly_pnl = _windowed_pnl(30)
+
     return TradeStats(
         total_trades=total + open_count,
         open_trades=open_count,
         closed_trades=total,
-        win_rate_pct=round(wins / total * 100.0, 2) if total > 0 else 0.0,
-        total_pnl_usd=float(row["total_pnl"] or 0.0) if row else 0.0,
-        avg_win_usd=float(row["avg_win"] or 0.0) if row else 0.0,
-        avg_loss_usd=float(row["avg_loss"] or 0.0) if row else 0.0,
+        win_rate_pct=round(win_rate * 100.0, 2),
+        total_pnl_usd=total_pnl_usd,
+        avg_win_usd=avg_win,
+        avg_loss_usd=avg_loss,
         profit_factor=round(profit_factor, 3),
         avg_risk_reward=float(row["avg_rr"] or 0.0) if row else 0.0,
         largest_win_usd=float(row["largest_win"] or 0.0) if row else 0.0,
         largest_loss_usd=float(row["largest_loss"] or 0.0) if row else 0.0,
         avg_duration_minutes=float(row["avg_duration_min"] or 0.0) if row else 0.0,
         measured_at=datetime.now(timezone.utc).isoformat(),
+        expectancy_usd=round(expectancy_usd, 2),
+        sharpe_ratio=risk_metrics["sharpe_ratio"],
+        sortino_ratio=risk_metrics["sortino_ratio"],
+        calmar_ratio=risk_metrics["calmar_ratio"],
+        max_drawdown_pct=risk_metrics["max_drawdown_pct"],
+        avg_trade_duration_minutes=float(row["avg_duration_min"] or 0.0) if row else 0.0,
+        best_day=best_day,
+        worst_day=worst_day,
+        equity_usd=round(equity_base, 2),
+        realized_pnl_usd=total_pnl_usd,
+        unrealized_pnl_usd=round(unrealized_pnl_usd, 2),
+        daily_return_pct=round(daily_pnl / equity_base * 100.0, 4) if equity_base > 0 else 0.0,
+        weekly_return_pct=round(weekly_pnl / equity_base * 100.0, 4) if equity_base > 0 else 0.0,
+        monthly_return_pct=round(monthly_pnl / equity_base * 100.0, 4) if equity_base > 0 else 0.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /trades/equity-curve
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/equity-curve",
+    response_model=list[EquityCurvePoint],
+    summary="Cumulative equity / drawdown time series from closed-trade PnL",
+)
+async def get_equity_curve(
+    symbol: str | None = Query(default=None),
+    since: str | None = Query(default=None, description="ISO datetime filter (e.g. 2024-01-01T00:00:00Z)"),
+    db: asyncpg.Connection = Depends(get_db),
+) -> list[EquityCurvePoint]:
+    params: list[Any] = []
+    conditions = ["status = 'closed'", "closed_at IS NOT NULL"]
+    idx = 1
+
+    if symbol:
+        conditions.append(f"symbol = ${idx}")
+        params.append(symbol)
+        idx += 1
+
+    if since:
+        conditions.append(f"opened_at >= ${idx}")
+        params.append(since)
+        idx += 1
+
+    where = f"WHERE {' AND '.join(conditions)}"
+    daily_series = await _fetch_daily_pnl_series(db, where, params)
+
+    equity_usd = await _fetch_equity_usd(db)
+    total_pnl = sum(pnl for _, pnl in daily_series)
+    equity_base = equity_usd if equity_usd is not None else max(abs(total_pnl) * 10, 10_000.0)
+
+    points: list[EquityCurvePoint] = []
+    cumulative = 0.0
+    peak = equity_base
+    for day, pnl in daily_series:
+        cumulative += pnl
+        current_equity = equity_base + cumulative
+        peak = max(peak, current_equity)
+        drawdown_pct = (peak - current_equity) / peak * 100.0 if peak > 0 else 0.0
+        points.append(
+            EquityCurvePoint(
+                timestamp=day.isoformat(),
+                cumulative_pnl_usd=round(cumulative, 2),
+                drawdown_pct=round(drawdown_pct, 3),
+            )
+        )
+
+    return points
+
+
+# ---------------------------------------------------------------------------
+# GET /trades/calendar
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/calendar",
+    response_model=list[CalendarDay],
+    summary="Daily PnL bucketed by date, for a monthly-heatmap-style calendar",
+)
+async def get_trade_calendar(
+    symbol: str | None = Query(default=None),
+    since: str | None = Query(default=None, description="ISO datetime filter (e.g. 2024-01-01T00:00:00Z)"),
+    until: str | None = Query(default=None, description="ISO datetime filter (e.g. 2024-12-31T23:59:59Z)"),
+    db: asyncpg.Connection = Depends(get_db),
+) -> list[CalendarDay]:
+    params: list[Any] = []
+    conditions = ["status = 'closed'", "closed_at IS NOT NULL"]
+    idx = 1
+
+    if symbol:
+        conditions.append(f"symbol = ${idx}")
+        params.append(symbol)
+        idx += 1
+
+    if since:
+        conditions.append(f"closed_at >= ${idx}")
+        params.append(since)
+        idx += 1
+
+    if until:
+        conditions.append(f"closed_at <= ${idx}")
+        params.append(until)
+        idx += 1
+
+    where = f"WHERE {' AND '.join(conditions)}"
+
+    rows = await db.fetch(
+        f"""
+        SELECT date_trunc('day', closed_at) AS day, SUM(pnl_usd) AS pnl, COUNT(*) AS cnt
+        FROM trades
+        {where}
+        GROUP BY day
+        ORDER BY day ASC
+        """,
+        *params,
+    )
+
+    return [
+        CalendarDay(
+            date=r["day"].date().isoformat(),
+            pnl_usd=round(float(r["pnl"] or 0.0), 2),
+            trade_count=int(r["cnt"]),
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

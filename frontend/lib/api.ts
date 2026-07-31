@@ -151,6 +151,116 @@ export interface ForecastExplanation {
   generated_at: string;
 }
 
+export interface DayPnl {
+  date: string;
+  pnl_usd: number;
+}
+
+export interface TradeStats {
+  total_trades: number;
+  open_trades: number;
+  closed_trades: number;
+  win_rate_pct: number;
+  total_pnl_usd: number;
+  avg_win_usd: number;
+  avg_loss_usd: number;
+  profit_factor: number;
+  avg_risk_reward: number;
+  largest_win_usd: number;
+  largest_loss_usd: number;
+  avg_duration_minutes: number;
+  measured_at: string;
+  expectancy_usd: number;
+  sharpe_ratio: number | null;
+  sortino_ratio: number | null;
+  calmar_ratio: number | null;
+  max_drawdown_pct: number;
+  avg_trade_duration_minutes: number;
+  best_day: DayPnl | null;
+  worst_day: DayPnl | null;
+  equity_usd: number;
+  realized_pnl_usd: number;
+  unrealized_pnl_usd: number;
+  daily_return_pct: number;
+  weekly_return_pct: number;
+  monthly_return_pct: number;
+}
+
+export interface EquityCurvePoint {
+  timestamp: string;
+  cumulative_pnl_usd: number;
+  drawdown_pct: number;
+}
+
+export interface CalendarDay {
+  date: string;
+  pnl_usd: number;
+  trade_count: number;
+}
+
+export interface BacktestRunRequest {
+  symbol: string;
+  timeframe: string;
+  strategy?: string | null;
+  date_range_start: string;
+  date_range_end: string;
+  notes?: string | null;
+}
+
+export interface BacktestRunSummary {
+  id: string;
+  created_at: string;
+  symbol: string;
+  timeframe: string;
+  strategy_name: string | null;
+  date_range_start: string;
+  date_range_end: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  notes: string | null;
+}
+
+export interface BacktestTradeSample {
+  forecast_id: string;
+  opened_at: string | null;
+  closed_at: string | null;
+  direction: 'LONG' | 'SHORT';
+  entry_price: number;
+  exit_price: number;
+  return_pct: number;
+  pnl_usd: number;
+  confidence_pct: number;
+  market_regime: string | null;
+  holding_minutes: number | null;
+}
+
+export interface BacktestResults {
+  num_trades: number;
+  num_forecasts_considered: number;
+  total_return_pct: number;
+  annual_return_pct: number;
+  win_rate_pct: number;
+  max_drawdown_pct: number;
+  profit_factor: number;
+  avg_trade_pnl_usd: number;
+  avg_holding_time_minutes: number | null;
+  best_trade: BacktestTradeSample | null;
+  worst_trade: BacktestTradeSample | null;
+  longest_winning_streak: number;
+  longest_losing_streak: number;
+  equity_curve: { timestamp: string; cumulative_pnl_usd: number; drawdown_pct: number }[];
+  trade_distribution: { bucket: string; count: number }[];
+  monthly_heatmap: { month: string; pnl_usd: number }[];
+  performance_by_regime: { regime: string; num_trades: number; total_pnl_usd: number; win_rate_pct: number }[];
+  performance_by_timeframe: { timeframe: string | null; num_trades: number; total_pnl_usd: number }[];
+  note?: string;
+}
+
+export interface BacktestRunDetail extends BacktestRunSummary {
+  results: BacktestResults;
+  error_message: string | null;
+  created_by: string | null;
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: {
@@ -224,6 +334,46 @@ export const api = {
 
   forecasts: {
     explain: (forecastId: string) => fetchAPI<ForecastExplanation>(`/forecasts/${forecastId}/explain`),
+  },
+
+  trades: {
+    stats: (params?: { symbol?: string; since?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.since) qs.set('since', params.since);
+      const q = qs.toString();
+      return fetchAPI<TradeStats>(`/trades/stats${q ? `?${q}` : ''}`);
+    },
+    equityCurve: (params?: { symbol?: string; since?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.since) qs.set('since', params.since);
+      const q = qs.toString();
+      return fetchAPI<EquityCurvePoint[]>(`/trades/equity-curve${q ? `?${q}` : ''}`);
+    },
+    calendar: (params?: { symbol?: string; since?: string; until?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.since) qs.set('since', params.since);
+      if (params?.until) qs.set('until', params.until);
+      const q = qs.toString();
+      return fetchAPI<CalendarDay[]>(`/trades/calendar${q ? `?${q}` : ''}`);
+    },
+  },
+
+  backtest: {
+    run: (req: BacktestRunRequest) =>
+      fetchAPI<BacktestRunDetail>('/backtest/run', { method: 'POST', body: JSON.stringify(req) }),
+    list: (params?: { symbol?: string; status?: string; limit?: number; offset?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.status) qs.set('status', params.status);
+      if (params?.limit) qs.set('limit', String(params.limit));
+      if (params?.offset) qs.set('offset', String(params.offset));
+      const q = qs.toString();
+      return fetchAPI<BacktestRunSummary[]>(`/backtest/runs${q ? `?${q}` : ''}`);
+    },
+    get: (id: string) => fetchAPI<BacktestRunDetail>(`/backtest/runs/${id}`),
   },
 
   system: {
