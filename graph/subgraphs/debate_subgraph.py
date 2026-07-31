@@ -239,6 +239,14 @@ def _rule_based_consensus(
     signal_map = {"bullish": "bull", "bearish": "bear", "neutral": "neutral", "no_signal": "neutral"}
     agent_weights: dict[str, float] = {}
 
+    # Phase 4: aggregate whatever numeric scored evidence agents provided this
+    # cycle (see graph/state.py AgentReport.supporting_evidence_scored /
+    # contradicting_evidence_scored). Agents that don't populate these yet
+    # simply contribute 0 here — they still count fully via the
+    # confidence-weighted vote above/below.
+    bullish_score = 0.0
+    bearish_score = 0.0
+
     for agent_id, report in reports.items():
         weight = report.confidence
         agent_weights[agent_id] = weight
@@ -250,6 +258,19 @@ def _rule_based_consensus(
             bear_weight += weight
         else:
             neutral_weight += weight
+
+        for item in report.supporting_evidence_scored:
+            try:
+                bullish_score += float(item.get("score", 0.0))
+            except (TypeError, ValueError):
+                continue
+        for item in report.contradicting_evidence_scored:
+            try:
+                bearish_score += float(item.get("score", 0.0))
+            except (TypeError, ValueError):
+                continue
+
+    net_ai_score = bullish_score - bearish_score
 
     if total_weight == 0:
         return ConsensusResult(
@@ -265,6 +286,9 @@ def _rule_based_consensus(
             risk_score=10.0,
             recommended_timeframe="1h",
             agent_weights=agent_weights,
+            bullish_score=round(bullish_score, 4),
+            bearish_score=round(bearish_score, 4),
+            net_ai_score=round(net_ai_score, 4),
         )
 
     bull_prob = bull_weight / total_weight
@@ -309,6 +333,9 @@ def _rule_based_consensus(
         risk_score=risk_score,
         recommended_timeframe="1h",
         agent_weights=agent_weights,
+        bullish_score=round(bullish_score, 4),
+        bearish_score=round(bearish_score, 4),
+        net_ai_score=round(net_ai_score, 4),
     )
 
 

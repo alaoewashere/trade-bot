@@ -36,6 +36,18 @@ class AgentReport(BaseModel):
     timestamp: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    # --- Phase 4 additions (additive, optional, backward compatible) ---
+    # Structured, numeric counterpart to the flat-string evidence lists above.
+    # Not every agent populates these yet (see agents/coordination/consensus_engine.py
+    # for the graceful fallback to confidence-weighted voting when absent).
+    # score is a signed point value, e.g. +22 for a strong bullish factor, -11 for
+    # a moderate bearish one — magnitude/sign convention is left to each agent, the
+    # consensus engine only sums what's present.
+    supporting_evidence_scored: list[dict[str, Any]] = Field(default_factory=list)
+    """Each item: {"label": str, "score": float (positive)}."""
+    contradicting_evidence_scored: list[dict[str, Any]] = Field(default_factory=list)
+    """Each item: {"label": str, "score": float (positive magnitude of the bearish/contra factor)}."""
+
     model_config = {"frozen": True}
 
 
@@ -92,6 +104,15 @@ class ConsensusResult(BaseModel):
     risk_score: float = Field(..., ge=0.0, le=10.0)
     recommended_timeframe: str
     agent_weights: dict[str, float] = Field(default_factory=dict)
+
+    # --- Phase 4 additions (additive) ---
+    # Aggregate of whatever supporting_evidence_scored/contradicting_evidence_scored
+    # is present across analysis_reports this cycle (see consensus_engine.py). Agents
+    # that don't provide scored evidence simply don't contribute to these sums — they
+    # still count via the pre-existing confidence-weighted vote above.
+    bullish_score: float = 0.0
+    bearish_score: float = 0.0
+    net_ai_score: float = 0.0
 
     model_config = {"frozen": True}
 
@@ -257,6 +278,14 @@ class HedgeFundState(TypedDict, total=False):
     # ------------------------------------------------------------------
     forecasts: dict[str, Forecast]
     market_regime: str | None
+
+    # Phase 4: per-agent {"win_count": int, "total_count": int} resolved-decision
+    # stats, computed by agents.coordination.weight_calculator.compute_weights_from_db
+    # (a DB call — populated by whatever assembles state before invoking the graph,
+    # since agent nodes themselves run synchronously with no DB handle). When
+    # present, consensus_engine.py uses it to derive real-performance-grounded
+    # weights as a fallback/default that runs BEFORE the learning_agent LLM override.
+    agent_performance_stats: dict[str, dict[str, int]]
 
     # ------------------------------------------------------------------
     # Safety / control flags

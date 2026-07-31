@@ -10,6 +10,7 @@ bull/bear probabilities, and a consensus confidence score.
 from __future__ import annotations
 
 from agents.base_agent import BaseAgent
+from agents.coordination.weight_calculator import compute_agent_weight
 from graph.state import AgentReport, HedgeFundState
 
 
@@ -112,8 +113,13 @@ YOUR CONSENSUS METHODOLOGY:
 
 5. WEIGHT CALIBRATION
    Base weights from _DEFAULT_AGENT_WEIGHTS.
+   Before any LLM adjustment, real per-agent historical accuracy (win_count /
+   total_count of resolved decisions, when available) is blended in via
+   agents.coordination.weight_calculator — small samples are shrunk toward the
+   default weight so one lucky/unlucky streak can't swing an agent's influence.
    Adjustments from learning_agent's metadata if available:
-   - If learning_agent provides updated weights, use those instead
+   - If learning_agent provides updated weights, apply them on top of the
+     performance-grounded weights above (learning_agent still has final say)
    - Bounds: 0.1 ≤ weight ≤ 3.0
 
 6. MINIMUM CONSENSUS REQUIREMENTS
@@ -215,8 +221,30 @@ Return AgentReport JSON with:
                 },
             )
 
-        # Get calibrated weights (check learning_agent for updates)
+        # Get calibrated weights.
+        # 1) Start from the static, backtest-calibrated defaults.
+        # 2) Apply real-performance-grounded weights from weight_calculator
+        #    (pure Python, no LLM) BEFORE any learning_agent override, so the
+        #    system doesn't depend on an LLM call succeeding each cycle to get
+        #    numerically-grounded weighting. Requires agent_performance_stats
+        #    to have been populated in state (see graph/state.py) — if absent,
+        #    this is a no-op and weights stay at the static defaults.
+        # 3) learning_agent's LLM-reasoned adjustments (if present) still get
+        #    the final say, applied on top, unchanged from before.
         weights = dict(_DEFAULT_AGENT_WEIGHTS)
+
+        perf_stats: dict[str, dict[str, int]] = state.get("agent_performance_stats", {}) or {}
+        for aid, default_w in _DEFAULT_AGENT_WEIGHTS.items():
+            stats = perf_stats.get(aid)
+            if not stats:
+                continue
+            weights[aid] = compute_agent_weight(
+                agent_id=aid,
+                default_weight=default_w,
+                win_count=int(stats.get("win_count", 0)),
+                total_count=int(stats.get("total_count", 0)),
+            )
+
         if "learning_agent" in analysis_reports:
             learning_meta = analysis_reports["learning_agent"].metadata
             if learning_meta and "agent_weights" in learning_meta:
@@ -258,6 +286,24 @@ Return AgentReport JSON with:
             else:
                 abstained_agents.append(aid)
                 agent_votes[aid] = {"signal": report.signal, "weight": weight, "weighted_vote": 0.0}
+
+        # Phase 4: numeric scored-evidence aggregation (additive to the existing
+        # confidence-weighted vote above). Agents without scored evidence yet
+        # simply contribute 0 — see graph/state.py AgentReport docstring.
+        bullish_score = 0.0
+        bearish_score = 0.0
+        for report in analysis_reports.values():
+            for item in report.supporting_evidence_scored:
+                try:
+                    bullish_score += float(item.get("score", 0.0))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            for item in report.contradicting_evidence_scored:
+                try:
+                    bearish_score += float(item.get("score", 0.0))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+        net_ai_score = bullish_score - bearish_score
 
         total_weighted = bull_weighted + bear_weighted
         if total_weighted == 0:
@@ -394,5 +440,8 @@ Return AgentReport JSON with:
                 "agent_votes": {k: v for k, v in list(agent_votes.items())[:20]},
                 "risk_score": round(risk_score, 2),
                 "sufficient_data": sufficient_data,
+                "bullish_score": round(bullish_score, 4),
+                "bearish_score": round(bearish_score, 4),
+                "net_ai_score": round(net_ai_score, 4),
             },
         )

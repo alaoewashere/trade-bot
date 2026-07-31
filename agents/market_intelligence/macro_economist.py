@@ -89,6 +89,12 @@ Return AgentReport JSON with:
 - contradicting_evidence: Macro factors arguing against
 - key_levels: {"fed_funds_rate": x, "10y_yield": x, "dxy": x, "inflation_cpi": x}
 - metadata: {"macro_regime": "risk_on/risk_off/transition", "rate_cycle": "hiking/pause/cutting", "dollar_trend": "strong/weak/neutral"}
+- supporting_evidence_scored (optional): list of {"label": str, "score": float}, e.g.
+  {"label": "Risk-on regime, DXY weakening", "score": 18}
+- contradicting_evidence_scored (optional): same shape for macro headwinds, e.g.
+  {"label": "Fed in hiking cycle, tightening liquidity", "score": 22}
+  Score = your point-value estimate of that factor's weight on the bullish/bearish case
+  (rough guide: minor ~5-10, moderate ~10-20, major ~20-30).
 """
 
     def analyze(self, state: HedgeFundState) -> AgentReport:
@@ -135,6 +141,8 @@ Return your Macro Economist AgentReport JSON.
                 reasoning=result.reasoning,
                 supporting_evidence=result.supporting_evidence,
                 contradicting_evidence=result.contradicting_evidence,
+                supporting_evidence_scored=result.supporting_evidence_scored,
+                contradicting_evidence_scored=result.contradicting_evidence_scored,
                 key_levels=result.key_levels,
                 timestamp=self._now(),
                 metadata=result.metadata,

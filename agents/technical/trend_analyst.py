@@ -84,6 +84,13 @@ Return AgentReport JSON with:
 - contradicting_evidence: Counter-trend signals
 - key_levels: {"ema8": x, "ema21": x, "ema50": x, "ema200": x, "adx": x}
 - metadata: {"trend_strength": "weak/moderate/strong/extreme", "ema_stack_aligned": bool, "structure": "uptrend/downtrend/ranging"}
+- supporting_evidence_scored (optional): list of {"label": str, "score": float}, e.g.
+  {"label": "Golden EMA stack aligned (8>21>50>200)", "score": 25},
+  {"label": "ADX 34 — established trend", "score": 15}
+- contradicting_evidence_scored (optional): same shape for bearish/counter-trend factors,
+  e.g. {"label": "Bearish RSI divergence on new high", "score": 12}
+  Score = your own point-value estimate of how much that single factor should move the
+  overall bullish/bearish case (rough guide: minor factor ~5-10, moderate ~10-20, major ~20-30).
 """
 
     def analyze(self, state: HedgeFundState) -> AgentReport:
@@ -152,6 +159,8 @@ Return your Trend Analyst AgentReport JSON.
                 reasoning=result.reasoning,
                 supporting_evidence=result.supporting_evidence,
                 contradicting_evidence=result.contradicting_evidence,
+                supporting_evidence_scored=result.supporting_evidence_scored,
+                contradicting_evidence_scored=result.contradicting_evidence_scored,
                 key_levels=result.key_levels,
                 timestamp=self._now(),
                 metadata=result.metadata,

@@ -10,6 +10,7 @@ GET /forecasts/{forecast_id}            — specific forecast by ID
 GET /forecasts/calibration              — Brier score / accuracy calibration stats
 GET /forecasts/leaderboard              — model accuracy ranking across all symbols
 GET /forecasts/dashboard                — institutional terminal: all 8 TFs for one symbol
+GET /forecasts/history                  — paginated prediction ledger with outcome/MFE/MAE (Phase 4)
 """
 from __future__ import annotations
 
@@ -161,6 +162,58 @@ class ForecastExplanation(BaseModel):
     departments: list[DepartmentGroup]
     agreement: AgreementSummary
     generated_at: str
+    # --- Phase 4 additions (additive) ---
+    supporting_evidence_scored: list[dict[str, Any]] = Field(default_factory=list)
+    contradicting_evidence_scored: list[dict[str, Any]] = Field(default_factory=list)
+    bullish_score: float = 0.0
+    bearish_score: float = 0.0
+    net_ai_score: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# GET /forecasts/history — Phase 4 prediction ledger
+# ---------------------------------------------------------------------------
+
+
+class ForecastHistoryEntry(BaseModel):
+    forecast_id: str
+    symbol: str
+    timeframe: str
+    created_at: str
+    expiry_at: str
+    price_at_creation: float
+    direction: str
+    confidence_pct: float
+    bull_probability: float
+    bear_probability: float
+    predicted_low: float
+    predicted_high: float
+    market_regime: str | None
+    reasoning_summary: str | None
+    # Evaluation / outcome (null until evaluator.py resolves the forecast)
+    evaluated: bool
+    outcome: str | None
+    actual_price_at_expiry: float | None
+    actual_direction: str | None
+    direction_correct: bool | None
+    range_hit: bool | None
+    absolute_error_pct: float | None
+    duration_minutes: int | None
+    high_touched: float | None
+    low_touched: float | None
+    mfe: float | None
+    mae: float | None
+    tp_price: float | None
+    sl_price: float | None
+    tp_hit: bool | None
+    sl_hit: bool | None
+
+
+class ForecastHistoryPage(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[ForecastHistoryEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +560,127 @@ async def get_dashboard(
     )
 
 
+@router.get(
+    "/history",
+    response_model=ForecastHistoryPage,
+    summary="Paginated prediction history / validation ledger",
+    description=(
+        "Full prediction records — creation snapshot plus resolved outcome fields "
+        "(win/loss/expired, MFE/MAE, duration, TP/SL breach) once evaluator.py has "
+        "resolved them. This is the ledger Phase 5's chart will plot markers from."
+    ),
+)
+async def get_forecast_history(
+    symbol: str | None = Query(default=None, description="Filter by trading symbol"),
+    timeframe: str | None = Query(default=None, description="Filter by timeframe"),
+    outcome: str | None = Query(
+        default=None, description="Filter by outcome: win, loss, expired, pending"
+    ),
+    since: str | None = Query(default=None, description="ISO timestamp — created_at >= since"),
+    until: str | None = Query(default=None, description="ISO timestamp — created_at <= until"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: asyncpg.Connection = Depends(get_db),
+) -> ForecastHistoryPage:
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    def _add(cond_tmpl: str, value: Any) -> None:
+        params.append(value)
+        conditions.append(cond_tmpl.format(n=len(params)))
+
+    if symbol:
+        _add("symbol = ${n}", symbol)
+    if timeframe:
+        _add("timeframe = ${n}", timeframe)
+    if outcome:
+        _add("outcome = ${n}", outcome)
+    if since:
+        _add("created_at >= ${n}::TIMESTAMPTZ", since)
+    if until:
+        _add("created_at <= ${n}::TIMESTAMPTZ", until)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    total_row = await db.fetchrow(
+        f"SELECT COUNT(*) AS total FROM forecasts {where_clause}", *params
+    )
+    total = int(total_row["total"]) if total_row else 0
+
+    params.append(limit)
+    limit_idx = len(params)
+    params.append(offset)
+    offset_idx = len(params)
+
+    rows = await db.fetch(
+        f"""
+        SELECT id AS forecast_id, symbol, timeframe, created_at, expiry_at,
+               price_at_creation, direction, confidence_pct, bull_probability,
+               bear_probability, predicted_low, predicted_high, market_regime,
+               supporting_evidence, contradicting_evidence,
+               evaluated, outcome, actual_price_at_expiry, actual_direction,
+               direction_correct, range_hit, absolute_error_pct, duration_minutes,
+               high_touched, low_touched, mfe, mae, tp_price, sl_price, tp_hit, sl_hit
+        FROM forecasts
+        {where_clause}
+        ORDER BY created_at DESC
+        LIMIT ${limit_idx} OFFSET ${offset_idx}
+        """,
+        *params,
+    )
+
+    import json as _json
+
+    def _reasoning_summary(row: asyncpg.Record) -> str | None:
+        raw = row["supporting_evidence"]
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except Exception:
+                raw = None
+        if isinstance(raw, list) and raw:
+            return "; ".join(str(x) for x in raw[:3])
+        return None
+
+    items = [
+        ForecastHistoryEntry(
+            forecast_id=str(r["forecast_id"]),
+            symbol=r["symbol"],
+            timeframe=r["timeframe"],
+            created_at=r["created_at"].isoformat(),
+            expiry_at=r["expiry_at"].isoformat(),
+            price_at_creation=float(r["price_at_creation"]) if r["price_at_creation"] is not None else 0.0,
+            direction=r["direction"],
+            confidence_pct=float(r["confidence_pct"]) if r["confidence_pct"] is not None else 0.0,
+            bull_probability=float(r["bull_probability"]) if r["bull_probability"] is not None else 0.0,
+            bear_probability=float(r["bear_probability"]) if r["bear_probability"] is not None else 0.0,
+            predicted_low=float(r["predicted_low"]) if r["predicted_low"] is not None else 0.0,
+            predicted_high=float(r["predicted_high"]) if r["predicted_high"] is not None else 0.0,
+            market_regime=r["market_regime"],
+            reasoning_summary=_reasoning_summary(r),
+            evaluated=bool(r["evaluated"]),
+            outcome=r["outcome"],
+            actual_price_at_expiry=float(r["actual_price_at_expiry"]) if r["actual_price_at_expiry"] is not None else None,
+            actual_direction=r["actual_direction"],
+            direction_correct=r["direction_correct"],
+            range_hit=r["range_hit"],
+            absolute_error_pct=float(r["absolute_error_pct"]) if r["absolute_error_pct"] is not None else None,
+            duration_minutes=r["duration_minutes"],
+            high_touched=float(r["high_touched"]) if r["high_touched"] is not None else None,
+            low_touched=float(r["low_touched"]) if r["low_touched"] is not None else None,
+            mfe=float(r["mfe"]) if r["mfe"] is not None else None,
+            mae=float(r["mae"]) if r["mae"] is not None else None,
+            tp_price=float(r["tp_price"]) if r["tp_price"] is not None else None,
+            sl_price=float(r["sl_price"]) if r["sl_price"] is not None else None,
+            tp_hit=r["tp_hit"],
+            sl_hit=r["sl_hit"],
+        )
+        for r in rows
+    ]
+
+    return ForecastHistoryPage(total=total, limit=limit, offset=offset, items=items)
+
+
 # ---------------------------------------------------------------------------
 # GET /forecasts/{forecast_id}
 # ---------------------------------------------------------------------------
@@ -592,7 +766,8 @@ async def explain_forecast(
     # Agent decisions in the window this forecast covers, for the same symbol.
     decisions = await db.fetch(
         """
-        SELECT agent_id, signal, confidence, reasoning, outcome, decided_at
+        SELECT agent_id, signal, confidence, reasoning, outcome, decided_at,
+               supporting_evidence_scored, contradicting_evidence_scored
         FROM agent_decisions
         WHERE symbol = $1 AND decided_at BETWEEN $2 AND $3
         ORDER BY decided_at DESC
@@ -601,6 +776,45 @@ async def explain_forecast(
         forecast["created_at"],
         forecast["expiry_at"],
     )
+
+    # Phase 4: aggregate whatever numeric scored evidence is present across the
+    # agent_decisions in this window (populated when agents provide
+    # AgentReport.supporting_evidence_scored / contradicting_evidence_scored —
+    # see graph/state.py). Agents without scored evidence simply contribute 0.
+    scored_support: list[dict[str, Any]] = []
+    scored_contra: list[dict[str, Any]] = []
+    bullish_score = 0.0
+    bearish_score = 0.0
+    for d in decisions:
+        sup = d["supporting_evidence_scored"]
+        con = d["contradicting_evidence_scored"]
+        if isinstance(sup, str):
+            try:
+                sup = _json.loads(sup)
+            except Exception:
+                sup = None
+        if isinstance(con, str):
+            try:
+                con = _json.loads(con)
+            except Exception:
+                con = None
+        if isinstance(sup, list):
+            for item in sup:
+                if isinstance(item, dict) and "score" in item:
+                    scored_support.append({**item, "agent_id": d["agent_id"]})
+                    try:
+                        bullish_score += float(item["score"])
+                    except (TypeError, ValueError):
+                        pass
+        if isinstance(con, list):
+            for item in con:
+                if isinstance(item, dict) and "score" in item:
+                    scored_contra.append({**item, "agent_id": d["agent_id"]})
+                    try:
+                        bearish_score += float(item["score"])
+                    except (TypeError, ValueError):
+                        pass
+    net_ai_score = bullish_score - bearish_score
 
     # Final thesis — pulled from the most recent matching trade_proposal's
     # debate_summary JSONB rather than re-derived (ConsensusResult.final_thesis
@@ -691,4 +905,9 @@ async def explain_forecast(
         departments=departments,
         agreement=agreement,
         generated_at=datetime.now(timezone.utc).isoformat(),
+        supporting_evidence_scored=scored_support,
+        contradicting_evidence_scored=scored_contra,
+        bullish_score=round(bullish_score, 4),
+        bearish_score=round(bearish_score, 4),
+        net_ai_score=round(net_ai_score, 4),
     )

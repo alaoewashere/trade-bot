@@ -96,7 +96,7 @@ class ForecastEvaluator:
             """
             SELECT id, symbol, timeframe, direction, confidence_pct,
                    bull_probability, price_at_creation, predicted_low, predicted_high,
-                   expiry_at, model_contributions
+                   created_at, expiry_at, model_contributions
             FROM forecasts
             WHERE evaluated = FALSE
               AND expiry_at < NOW()
@@ -112,47 +112,69 @@ class ForecastEvaluator:
         for row in rows:
             try:
                 symbol = row["symbol"]
+                created_at: datetime = row["created_at"]
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
                 expiry_at: datetime = row["expiry_at"]
                 if expiry_at.tzinfo is None:
                     expiry_at = expiry_at.replace(tzinfo=timezone.utc)
 
-                actual_price = await self._get_actual_price(symbol, expiry_at)
-                if actual_price is None:
-                    logger.debug(
-                        "actual_price_unavailable",
-                        symbol=symbol,
-                        expiry_at=expiry_at.isoformat(),
-                        detail="Will retry next cycle.",
-                    )
-                    continue
-
                 creation_price = float(row["price_at_creation"])
-                actual_direction = "bullish" if actual_price > creation_price else "bearish"
-                direction_correct = actual_direction == row["direction"]
                 predicted_low = float(row["predicted_low"])
                 predicted_high = float(row["predicted_high"])
+                direction = row["direction"]
+
+                # Full price path over the forecast's lifetime, not just the price
+                # at expiry — needed to derive real MFE/MAE and TP/SL breaches
+                # rather than approximating them from the predicted range.
+                path = await self._get_price_path(symbol, created_at, expiry_at)
+
+                if not path:
+                    # Fall back to a single point-in-time price so evaluation can
+                    # still proceed (e.g. very short forecast windows where a full
+                    # series isn't meaningfully different from a point lookup).
+                    point_price = await self._get_actual_price(symbol, expiry_at)
+                    if point_price is None:
+                        logger.debug(
+                            "actual_price_unavailable",
+                            symbol=symbol,
+                            expiry_at=expiry_at.isoformat(),
+                            detail="Will retry next cycle.",
+                        )
+                        continue
+                    path = [{"high": point_price, "low": point_price, "close": point_price, "ts": expiry_at.timestamp() * 1000}]
+
+                actual_price = float(path[-1]["close"])
+                high_touched = max(float(b["high"]) for b in path)
+                low_touched = min(float(b["low"]) for b in path)
+
+                actual_direction = "bullish" if actual_price > creation_price else "bearish"
+                direction_correct = actual_direction == direction
                 range_hit = predicted_low <= actual_price <= predicted_high
 
-                # Percentage move
                 abs_error = (
                     abs(actual_price - creation_price) / creation_price * 100
                     if creation_price > 0
                     else 0.0
                 )
 
-                # MFE / MAE (simplified via predicted range as proxy for intra-period extremes)
-                mfe = max(
-                    0.0,
-                    (predicted_high - creation_price) / creation_price * 100
-                    if creation_price > 0
-                    else 0.0,
-                )
-                mae = max(
-                    0.0,
-                    (creation_price - predicted_low) / creation_price * 100
-                    if creation_price > 0
-                    else 0.0,
-                )
+                mfe, mae = self._compute_mfe_mae(direction, creation_price, high_touched, low_touched)
+
+                # TP/SL: pulled from the nearest trade_proposal's risk_assessment
+                # JSONB in the same window (same join pattern used by
+                # api/routers/forecasts.py's /explain endpoint), since forecasts
+                # themselves don't carry explicit TP/SL levels.
+                tp_price, sl_price = await self._lookup_tp_sl(symbol, created_at)
+                tp_hit, sl_hit = self._compute_tp_sl_hits(direction, path, tp_price, sl_price)
+
+                duration_minutes = int((expiry_at - created_at).total_seconds() / 60)
+
+                if direction == "neutral":
+                    outcome = "expired"
+                elif direction_correct:
+                    outcome = "win"
+                else:
+                    outcome = "loss"
 
                 await self.db.execute(
                     """
@@ -164,7 +186,17 @@ class ForecastEvaluator:
                         range_hit              = $5,
                         absolute_error_pct     = $6,
                         mfe                    = $7,
-                        mae                    = $8
+                        mae                    = $8,
+                        outcome                = $9,
+                        duration_minutes       = $10,
+                        high_touched           = $11,
+                        low_touched            = $12,
+                        tp_price               = $13,
+                        sl_price               = $14,
+                        tp_hit                 = $15,
+                        sl_hit                 = $16,
+                        price_path_source      = $17,
+                        price_path_bar_count   = $18
                     WHERE id = $1
                     """,
                     row["id"],
@@ -175,6 +207,16 @@ class ForecastEvaluator:
                     abs_error,
                     mfe,
                     mae,
+                    outcome,
+                    duration_minutes,
+                    high_touched,
+                    low_touched,
+                    tp_price,
+                    sl_price,
+                    tp_hit,
+                    sl_hit,
+                    "ccxt" if self._is_crypto(symbol) else "alpaca",
+                    len(path),
                 )
 
                 logger.debug(
@@ -183,6 +225,9 @@ class ForecastEvaluator:
                     symbol=symbol,
                     direction_correct=direction_correct,
                     range_hit=range_hit,
+                    outcome=outcome,
+                    mfe=mfe,
+                    mae=mae,
                 )
                 evaluated += 1
 
@@ -194,6 +239,250 @@ class ForecastEvaluator:
                 )
 
         return evaluated
+
+    # ------------------------------------------------------------------
+    # MFE / MAE / TP-SL helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_mfe_mae(
+        direction: str, creation_price: float, high_touched: float, low_touched: float
+    ) -> tuple[float, float]:
+        """
+        Maximum Favourable/Adverse Excursion, in percent, derived from the real
+        high/low touched during the forecast's lifetime (not the predicted range).
+
+        - bullish forecast: favourable = upside (high_touched), adverse = downside (low_touched)
+        - bearish forecast: favourable = downside (low_touched), adverse = upside (high_touched)
+        - neutral forecast: no directional bet — MFE/MAE both measured as the
+          largest move away from creation price in either direction, reported
+          as favourable=smaller move / adverse=larger move so at least the
+          magnitude of drift is captured.
+        """
+        if creation_price <= 0:
+            return 0.0, 0.0
+
+        up_pct = (high_touched - creation_price) / creation_price * 100
+        down_pct = (creation_price - low_touched) / creation_price * 100
+
+        if direction == "bullish":
+            mfe, mae = max(0.0, up_pct), max(0.0, down_pct)
+        elif direction == "bearish":
+            mfe, mae = max(0.0, down_pct), max(0.0, up_pct)
+        else:
+            moves = sorted([max(0.0, up_pct), max(0.0, down_pct)])
+            mfe, mae = moves[0], moves[1]
+
+        return round(mfe, 6), round(mae, 6)
+
+    @staticmethod
+    def _compute_tp_sl_hits(
+        direction: str,
+        path: list[dict[str, Any]],
+        tp_price: float | None,
+        sl_price: float | None,
+    ) -> tuple[bool | None, bool | None]:
+        """Whether TP/SL levels (if known) were breached at any point in the price path."""
+        if tp_price is None and sl_price is None:
+            return None, None
+
+        tp_hit = False
+        sl_hit = False
+        for bar in path:
+            high = float(bar["high"])
+            low = float(bar["low"])
+            if tp_price is not None:
+                if direction == "bearish":
+                    tp_hit = tp_hit or low <= tp_price
+                else:
+                    tp_hit = tp_hit or high >= tp_price
+            if sl_price is not None:
+                if direction == "bearish":
+                    sl_hit = sl_hit or high >= sl_price
+                else:
+                    sl_hit = sl_hit or low <= sl_price
+
+        return (tp_hit if tp_price is not None else None), (sl_hit if sl_price is not None else None)
+
+    async def _lookup_tp_sl(self, symbol: str, created_at: datetime) -> tuple[float | None, float | None]:
+        """
+        Best-effort lookup of TP/SL levels from the nearest trade_proposal's
+        risk_assessment JSONB (mirrors the join used by /forecasts/{id}/explain).
+        Returns (None, None) if no proposal is close enough or fields are absent.
+        """
+        try:
+            row = await self.db.fetchrow(
+                """
+                SELECT risk_assessment
+                FROM trade_proposals
+                WHERE symbol = $1
+                ORDER BY ABS(EXTRACT(EPOCH FROM (proposed_at - $2::TIMESTAMPTZ)))
+                LIMIT 1
+                """,
+                symbol,
+                created_at,
+            )
+        except Exception:
+            return None, None
+
+        if not row or not row["risk_assessment"]:
+            return None, None
+
+        ra = row["risk_assessment"]
+        if isinstance(ra, str):
+            try:
+                ra = json.loads(ra)
+            except Exception:
+                return None, None
+        if not isinstance(ra, dict):
+            return None, None
+
+        tp = ra.get("take_profit")
+        if tp is None:
+            levels = ra.get("take_profit_levels")
+            if isinstance(levels, list) and levels:
+                tp = levels[0]
+        sl = ra.get("stop_loss")
+
+        try:
+            tp_f = float(tp) if tp is not None else None
+        except (TypeError, ValueError):
+            tp_f = None
+        try:
+            sl_f = float(sl) if sl is not None else None
+        except (TypeError, ValueError):
+            sl_f = None
+
+        return tp_f, sl_f
+
+    @staticmethod
+    def _is_crypto(symbol: str) -> bool:
+        sym_upper = symbol.upper()
+        return any(
+            sym_upper.endswith(sfx)
+            for sfx in ("/USDT", "/USD", "/BTC", "/ETH", "/BUSD", "/USDC")
+        ) or any(
+            sym_upper.startswith(base) and "/" in sym_upper
+            for base in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA")
+        )
+
+    async def _get_price_path(
+        self, symbol: str, start_time: datetime, end_time: datetime
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch the full OHLCV series between start_time and end_time (inclusive),
+        choosing a bar timeframe that keeps the request to a reasonable size —
+        we only need the high/low envelope and closing price, not every tick.
+        Returns a list of {"ts": ms, "open", "high", "low", "close"} dicts in
+        chronological order, or [] if unavailable (caller falls back to a
+        single point-in-time lookup).
+        """
+        span_minutes = max(1.0, (end_time - start_time).total_seconds() / 60.0)
+        if span_minutes <= 1000:
+            bar_tf = "1m"
+        elif span_minutes <= 1000 * 15:
+            bar_tf = "15m"
+        else:
+            bar_tf = "1h"
+
+        if self._is_crypto(symbol):
+            return await self._get_crypto_price_path(symbol, start_time, end_time, bar_tf)
+        return await self._get_equity_price_path(symbol, start_time, end_time, bar_tf)
+
+    async def _get_crypto_price_path(
+        self, symbol: str, start_time: datetime, end_time: datetime, bar_tf: str
+    ) -> list[dict[str, Any]]:
+        try:
+            import ccxt.async_support as ccxt
+
+            exchange = self._ccxt_exchanges.get("binance")
+            if exchange is None:
+                exchange = ccxt.binance(
+                    {
+                        "apiKey": self.settings.binance_api_key,
+                        "secret": self.settings.binance_secret_key,
+                        "enableRateLimit": True,
+                    }
+                )
+                self._ccxt_exchanges["binance"] = exchange
+
+            since_ms = int(start_time.timestamp() * 1000)
+            until_ms = int(end_time.timestamp() * 1000)
+            bars: list[dict[str, Any]] = []
+            cursor = since_ms
+            # ccxt caps limit per call; page through until we pass until_ms or
+            # hit a sane bar cap to avoid unbounded requests for very old/long forecasts.
+            max_bars = 1500
+            while cursor <= until_ms and len(bars) < max_bars:
+                ohlcv = await exchange.fetch_ohlcv(symbol, bar_tf, since=cursor, limit=500)
+                if not ohlcv:
+                    break
+                for bar in ohlcv:
+                    if bar[0] > until_ms:
+                        break
+                    bars.append(
+                        {"ts": bar[0], "open": bar[1], "high": bar[2], "low": bar[3], "close": bar[4]}
+                    )
+                last_ts = ohlcv[-1][0]
+                if last_ts <= cursor:
+                    break
+                cursor = last_ts + 1
+                if ohlcv[-1][0] > until_ms:
+                    break
+
+            return bars
+
+        except Exception as exc:
+            logger.warning("ccxt_price_path_fetch_failed", symbol=symbol, error=str(exc))
+            return []
+
+    async def _get_equity_price_path(
+        self, symbol: str, start_time: datetime, end_time: datetime, bar_tf: str
+    ) -> list[dict[str, Any]]:
+        try:
+            if self._httpx_client is None:
+                import httpx
+                self._httpx_client = httpx.AsyncClient(timeout=10.0)
+
+            base_url = "https://data.alpaca.markets/v2"
+            headers = {
+                "APCA-API-KEY-ID": self.settings.alpaca_api_key,
+                "APCA-API-SECRET-KEY": self.settings.alpaca_secret_key,
+            }
+            alpaca_symbol = symbol.replace("/", "")
+            alpaca_tf = {"1m": "1Min", "15m": "15Min", "1h": "1Hour"}.get(bar_tf, "1Min")
+
+            params = {
+                "symbols": alpaca_symbol,
+                "timeframe": alpaca_tf,
+                "start": start_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end": end_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "limit": 1500,
+                "feed": "iex",
+                "sort": "asc",
+            }
+
+            response = await self._httpx_client.get(
+                f"{base_url}/stocks/bars", headers=headers, params=params
+            )
+            response.raise_for_status()
+            data = response.json()
+            bars_raw = data.get("bars", {}).get(alpaca_symbol, [])
+
+            return [
+                {
+                    "ts": b.get("t"),
+                    "open": float(b["o"]),
+                    "high": float(b["h"]),
+                    "low": float(b["l"]),
+                    "close": float(b["c"]),
+                }
+                for b in bars_raw
+            ]
+
+        except Exception as exc:
+            logger.warning("alpaca_price_path_fetch_failed", symbol=symbol, error=str(exc))
+            return []
 
     # ------------------------------------------------------------------
     # Actual price fetching

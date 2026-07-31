@@ -93,6 +93,12 @@ Return AgentReport JSON with:
 - contradicting_evidence: Statistical weaknesses or regime risks
 - key_levels: {"mean_expected_return": x, "std_return": x, "win_rate_pct": x}
 - metadata: {"sample_size": x, "ic": x, "sharpe_estimate": x, "regime": "bull/bear/transition", "hurst_estimate": x}
+- supporting_evidence_scored (optional): list of {"label": str, "score": float}, e.g.
+  {"label": "Positive expectancy setup, n=48, mean return +1.8%", "score": 20}
+- contradicting_evidence_scored (optional): same shape for statistically bearish/weak
+  factors, e.g. {"label": "Sample size n=8 — insufficient for inference", "score": 15}
+  Score = your point-value estimate of that factor's weight on the bullish/bearish case
+  (rough guide: minor ~5-10, moderate ~10-20, major ~20-30).
 """
 
     def analyze(self, state: HedgeFundState) -> AgentReport:
@@ -156,6 +162,8 @@ Return your Quant Researcher AgentReport JSON.
                 reasoning=result.reasoning,
                 supporting_evidence=result.supporting_evidence,
                 contradicting_evidence=result.contradicting_evidence,
+                supporting_evidence_scored=result.supporting_evidence_scored,
+                contradicting_evidence_scored=result.contradicting_evidence_scored,
                 key_levels=result.key_levels,
                 timestamp=self._now(),
                 metadata=result.metadata,

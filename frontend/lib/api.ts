@@ -119,6 +119,13 @@ export interface JournalEntry {
   created_at: string;
 }
 
+export interface ScoredEvidenceItem {
+  label: string;
+  score: number;
+  agent_id?: string;
+  [key: string]: unknown;
+}
+
 export interface ForecastExplanation {
   forecast_id: string;
   symbol: string;
@@ -149,6 +156,92 @@ export interface ForecastExplanation {
     dissenting_agent_ids: string[];
   };
   generated_at: string;
+  // --- Phase 4 additions (additive) ---
+  supporting_evidence_scored: ScoredEvidenceItem[];
+  contradicting_evidence_scored: ScoredEvidenceItem[];
+  bullish_score: number;
+  bearish_score: number;
+  net_ai_score: number;
+}
+
+// --- Phase 4: prediction history / validation ledger ---
+
+export interface ForecastHistoryEntry {
+  forecast_id: string;
+  symbol: string;
+  timeframe: string;
+  created_at: string;
+  expiry_at: string;
+  price_at_creation: number;
+  direction: string;
+  confidence_pct: number;
+  bull_probability: number;
+  bear_probability: number;
+  predicted_low: number;
+  predicted_high: number;
+  market_regime: string | null;
+  reasoning_summary: string | null;
+  evaluated: boolean;
+  outcome: 'win' | 'loss' | 'expired' | 'pending' | null;
+  actual_price_at_expiry: number | null;
+  actual_direction: string | null;
+  direction_correct: boolean | null;
+  range_hit: boolean | null;
+  absolute_error_pct: number | null;
+  duration_minutes: number | null;
+  high_touched: number | null;
+  low_touched: number | null;
+  mfe: number | null;
+  mae: number | null;
+  tp_price: number | null;
+  sl_price: number | null;
+  tp_hit: boolean | null;
+  sl_hit: boolean | null;
+}
+
+export interface ForecastHistoryPage {
+  total: number;
+  limit: number;
+  offset: number;
+  items: ForecastHistoryEntry[];
+}
+
+// --- Phase 4: agent performance ---
+
+export interface AgentPerformance {
+  agent_id: string;
+  total_reports: number;
+  bullish_count: number;
+  bearish_count: number;
+  neutral_count: number;
+  no_signal_count: number;
+  avg_confidence: number;
+  accuracy_pct: number | null;
+  brier_score: number | null;
+  measured_at: string;
+  win_rate_pct: number | null;
+  avg_return_pct: number | null;
+  reliability_score: number | null;
+  current_form_pct: number | null;
+  all_time_accuracy_pct: number | null;
+  longest_winning_streak: number;
+  longest_losing_streak: number;
+  last_100_predictions: string[];
+  success_by_regime: Record<string, number>;
+  success_by_timeframe: Record<string, number>;
+  success_by_asset: Record<string, number>;
+  resolved_decisions: number;
+  pending_decisions: number;
+}
+
+export interface AgentRankingEntry {
+  agent_id: string;
+  department: string;
+  reliability_score: number;
+  accuracy_pct: number | null;
+  win_rate_pct: number | null;
+  resolved_decisions: number;
+  current_form_pct: number | null;
 }
 
 export interface DayPnl {
@@ -428,6 +521,13 @@ export const api = {
   agents: {
     getAll: () => fetchAPI<AgentState[]>('/agents'),
     getById: (id: string) => fetchAPI<AgentState>(`/agents/${id}`),
+    getPerformance: (id: string) => fetchAPI<AgentPerformance>(`/agents/${id}/performance`),
+    getRankings: (params?: { min_decisions?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.min_decisions !== undefined) qs.set('min_decisions', String(params.min_decisions));
+      const q = qs.toString();
+      return fetchAPI<AgentRankingEntry[]>(`/agents/rankings${q ? `?${q}` : ''}`);
+    },
   },
 
   trading: {
@@ -492,6 +592,26 @@ export const api = {
 
   forecasts: {
     explain: (forecastId: string) => fetchAPI<ForecastExplanation>(`/forecasts/${forecastId}/explain`),
+    history: (params?: {
+      symbol?: string;
+      timeframe?: string;
+      outcome?: string;
+      since?: string;
+      until?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.symbol) qs.set('symbol', params.symbol);
+      if (params?.timeframe) qs.set('timeframe', params.timeframe);
+      if (params?.outcome) qs.set('outcome', params.outcome);
+      if (params?.since) qs.set('since', params.since);
+      if (params?.until) qs.set('until', params.until);
+      if (params?.limit) qs.set('limit', String(params.limit));
+      if (params?.offset) qs.set('offset', String(params.offset));
+      const q = qs.toString();
+      return fetchAPI<ForecastHistoryPage>(`/forecasts/history${q ? `?${q}` : ''}`);
+    },
   },
 
   trades: {
